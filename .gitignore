@@ -19,3 +19,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.egg-info/
+
+# claude
+.claude/
+CLAUDE.md
+PLAN.md
