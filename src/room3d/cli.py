@@ -1,0 +1,256 @@
+"""room3d command line.
+
+    room3d extract     data/rooms/office/video.mp4 --room office
+    room3d reconstruct out/office/frames --room office
+    room3d level       --room office            # only for rooms built before levelling
+    room3d label       out/office/frames.npz --room office [--direct]
+    room3d view        out/office
+    room3d run         data/rooms/office/video.mp4 --room office
+
+Stages are separate commands on purpose. Reconstruction takes tens of minutes on
+CPU; relabeling should not require redoing it, and `frames.npz` is the interface
+that makes the two halves independent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from .config import load_config
+
+
+def _out_dir(room: str) -> Path:
+    return Path("out") / room
+
+
+def cmd_extract(args) -> int:
+    from .frames import extract_frames
+
+    cfg = load_config(args.config).frames
+    out = _out_dir(args.room) / "frames"
+    frames = extract_frames(
+        args.source, out,
+        n_frames=args.n_frames or cfg.n_frames,
+        blur_percentile=cfg.blur_percentile,
+        dedup_correlation=cfg.dedup_correlation,
+        min_frames=cfg.min_frames,
+    )
+    print(f"[extract] {len(frames)} frames -> {out}")
+    for f in frames:
+        print(f"          {f.path.name}  t={f.timestamp:7.2f}s  sharpness={f.sharpness:8.1f}")
+    return 0
+
+
+def cmd_reconstruct(args) -> int:
+    from .reconstruct import reconstruct
+
+    cfg = load_config(args.config).reconstruct
+    frame_dir = Path(args.frames)
+    paths = sorted(p for p in frame_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
+    if len(paths) < 2:
+        print(f"error: need at least 2 frames in {frame_dir}", file=sys.stderr)
+        return 1
+
+    reconstruct(
+        paths, _out_dir(args.room),
+        checkpoint=args.checkpoint or cfg.checkpoint,
+        image_size=cfg.image_size,
+        scene_graph=args.scene_graph or cfg.scene_graph,
+        niter=cfg.niter,
+        lr=cfg.lr,
+        schedule=cfg.schedule,
+        min_conf_thr=cfg.min_conf_thr,
+        device=cfg.device,
+        scale_ref=args.scale_ref,
+        allow_mixed=args.allow_mixed,
+        level=not args.no_level,
+    )
+    return 0
+
+
+def cmd_level(args) -> int:
+    from .level import level_room
+
+    out = _out_dir(args.room)
+    if not (out / "frames.npz").exists():
+        print(f"error: {out / 'frames.npz'} not found; reconstruct this room first",
+              file=sys.stderr)
+        return 1
+
+    result = level_room(out, up=args.up)
+    if result.estimate.confidence < 0.4 and not args.up:
+        print("\nThat estimate is weak. Check the Floor plan tab, and if it is wrong "
+              "re-run with an explicit axis, e.g.  room3d level --room "
+              f"{args.room} --up -y", file=sys.stderr)
+    return 0
+
+
+def cmd_label(args) -> int:
+    from .artifacts import load_frames_npz
+    from .crew import run_labeling
+
+    cfg = load_config(args.config).label
+    if args.max_frames:
+        cfg.max_frames = args.max_frames
+
+    recon = load_frames_npz(args.npz)
+    run_labeling(
+        recon,
+        _out_dir(args.room) / "objects.json",
+        config=cfg,
+        use_crew=not args.direct,
+        room_name=args.room,
+        scale_verified=args.scale_verified,
+    )
+    return 0
+
+
+def cmd_view(args) -> int:
+    from .viewer import view
+
+    d = Path(args.dir)
+    view(
+        d / "scene.ply",
+        d / "objects.json",
+        d / "trajectory.txt",
+        min_confidence=args.min_confidence,
+    )
+    return 0
+
+
+def cmd_ui(args) -> int:
+    from .webapp.server import serve
+
+    vendor = Path(__file__).parent / "webapp" / "static" / "vendor" / "three.module.js"
+    if not vendor.exists():
+        print("error: frontend assets missing. Run:\n"
+              "    uv run python scripts/fetch_vendor.py", file=sys.stderr)
+        return 1
+
+    print(f"room3d viewer -> http://{args.host}:{args.port}")
+    serve(host=args.host, port=args.port, out_dir=args.out, open_browser=args.open)
+    return 0
+
+
+def cmd_run(args) -> int:
+    """Everything, end to end."""
+    from .artifacts import load_frames_npz
+    from .crew import run_labeling
+    from .frames import extract_frames
+    from .reconstruct import reconstruct
+
+    cfg = load_config(args.config)
+    out = _out_dir(args.room)
+
+    frames = extract_frames(
+        args.source, out / "frames",
+        n_frames=args.n_frames or cfg.frames.n_frames,
+        blur_percentile=cfg.frames.blur_percentile,
+        dedup_correlation=cfg.frames.dedup_correlation,
+        min_frames=cfg.frames.min_frames,
+    )
+    print(f"[run] extracted {len(frames)} frames")
+
+    reconstruct(
+        [f.path for f in frames], out,
+        checkpoint=args.checkpoint or cfg.reconstruct.checkpoint,
+        image_size=cfg.reconstruct.image_size,
+        scene_graph=args.scene_graph or cfg.reconstruct.scene_graph,
+        niter=cfg.reconstruct.niter,
+        min_conf_thr=cfg.reconstruct.min_conf_thr,
+        device=cfg.reconstruct.device,
+        scale_ref=args.scale_ref,
+        allow_mixed=args.allow_mixed,
+        level=not args.no_level,
+    )
+
+    if args.no_label:
+        print("[run] --no-label given; stopping after reconstruction")
+        return 0
+
+    run_labeling(
+        load_frames_npz(out / "frames.npz"),
+        out / "objects.json",
+        config=cfg.label,
+        use_crew=not args.direct,
+        room_name=args.room,
+        scale_verified=args.scale_ref is not None,
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="room3d", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--config", default=None, help="path to a config YAML")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    e = sub.add_parser("extract", help="video/folder -> sharp, deduplicated frames")
+    e.add_argument("source")
+    e.add_argument("--room", required=True)
+    e.add_argument("--n-frames", type=int, default=None)
+    e.set_defaults(func=cmd_extract)
+
+    r = sub.add_parser("reconstruct", help="frames -> scene.ply, trajectory.txt, frames.npz")
+    r.add_argument("frames")
+    r.add_argument("--room", required=True)
+    r.add_argument("--checkpoint", default=None)
+    r.add_argument("--scene-graph", default=None, help='e.g. "swin-3" or "complete"')
+    r.add_argument("--scale-ref", type=float, default=None,
+                   help="rescale so the largest scene extent equals this many metres")
+    r.add_argument("--allow-mixed", action="store_true",
+                   help="if images have mixed orientations, keep only the majority")
+    r.add_argument("--no-level", action="store_true",
+                   help="keep the aligner's raw camera-anchored frame (leaves the "
+                        "scene upside down; see `room3d level`)")
+    r.set_defaults(func=cmd_reconstruct)
+
+    g = sub.add_parser("level", help="stand an existing room upright: +Y up, floor at y=0")
+    g.add_argument("--room", required=True)
+    g.add_argument("--up", default=None,
+                   help="skip estimation and declare the up axis: x, y, z, -x, -y, -z")
+    g.set_defaults(func=cmd_level)
+
+    l = sub.add_parser("label", help="frames.npz -> objects.json")
+    l.add_argument("npz")
+    l.add_argument("--room", required=True)
+    l.add_argument("--direct", action="store_true",
+                   help="call the tools in order without the agent loop")
+    l.add_argument("--max-frames", type=int, default=None)
+    l.add_argument("--scale-verified", action="store_true",
+                   help="record that the metric scale was checked against a real measurement")
+    l.set_defaults(func=cmd_label)
+
+    v = sub.add_parser("view", help="show the cloud with labeled boxes")
+    v.add_argument("dir")
+    v.add_argument("--min-confidence", type=float, default=0.0)
+    v.set_defaults(func=cmd_view)
+
+    u = sub.add_parser("ui", help="browser viewer: frames, cloud, floor plan, trajectory")
+    u.add_argument("--port", type=int, default=8000)
+    u.add_argument("--host", default="127.0.0.1")
+    u.add_argument("--out", default="out", help="directory holding the room outputs")
+    u.add_argument("--open", action="store_true", help="open a browser window")
+    u.set_defaults(func=cmd_ui)
+
+    a = sub.add_parser("run", help="extract + reconstruct + label")
+    a.add_argument("source")
+    a.add_argument("--room", required=True)
+    a.add_argument("--n-frames", type=int, default=None)
+    a.add_argument("--checkpoint", default=None)
+    a.add_argument("--scene-graph", default=None)
+    a.add_argument("--scale-ref", type=float, default=None)
+    a.add_argument("--allow-mixed", action="store_true")
+    a.add_argument("--no-level", action="store_true")
+    a.add_argument("--direct", action="store_true")
+    a.add_argument("--no-label", action="store_true")
+    a.set_defaults(func=cmd_run)
+
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

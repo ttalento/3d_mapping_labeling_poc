@@ -1,0 +1,56 @@
+[project]
+name = "room3d"
+version = "0.1.0"
+description = "3D room mapping from casual video with an agentic VLM labeling pipeline"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # --- reconstruction core (CPU) ---
+    "torch>=2.2",
+    "torchvision",
+    "roma",
+    "einops",
+    "numpy<2",
+    "scipy",
+    "opencv-python",
+    "trimesh",
+    "scikit-learn",
+    "huggingface-hub[torch]>=0.22",
+    "tqdm",
+    # --- video / io ---
+    "imageio-ffmpeg",      # bundles an ffmpeg binary; no system install needed
+    "imageio",
+    "pillow",
+    "pyyaml",
+    # --- labeling ---
+    "google-genai",
+    "crewai",
+    "python-dotenv",
+    "pydantic>=2",
+    # --- viewer ---
+    "open3d",
+    # --- web app (fastapi/uvicorn/starlette already arrive via crewai; pinned
+    #     explicitly so the app does not depend on a transitive accident) ---
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+]
+
+[project.scripts]
+room3d = "room3d.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx",          # fastapi TestClient transport
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/room3d"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

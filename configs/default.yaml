@@ -1,0 +1,40 @@
+# Defaults for a normal office/bedroom-sized room shot on a phone.
+# Frame count is the dominant cost knob: ~13.5 s per image pair on CPU
+# (measured, Core Ultra 7 155H), so 24 frames is roughly 40 minutes.
+
+frames:
+  n_frames: 24
+  blur_percentile: 25.0        # reject the blurriest quarter of candidates
+  dedup_correlation: 0.985     # drop frames near-identical to the last kept
+  min_frames: 4
+
+reconstruct:
+  checkpoint: checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+  image_size: 512
+  scene_graph: swin-3          # O(N) pairs. "complete" is O(N^2) and hours on CPU.
+  niter: 300
+  lr: 0.01
+  schedule: cosine
+  min_conf_thr: 3.0
+  device: cpu
+
+label:
+  # MODEL / GEMINI_MODEL in .env overrides this. Routing prefixes are stripped,
+  # so "google/gemini-3.5-flash-lite" and "gemini-3.5-flash-lite" both work.
+  # Lite models are weaker at spatial grounding (boxes and masks).
+  model: gemini-3.6-flash
+  max_frames: 24
+  # Masks would beat boxes, but current Gemini models either omit them or
+  # truncate the reply returning them (see vlm.py). Boxes + depth clustering is
+  # the reliable path. Flip to true to retry on a newer model.
+  use_masks: false
+  mask_erode_px: 3             # pull in from the edges, where depth bleed lives
+  min_mask_points: 40          # below this, drop rather than fabricate a position
+  depth_cluster_eps: 0.15      # metres; separates object from its background
+  merge_radius_floor: 0.30     # metres
+  merge_radius_scale: 0.50     # fraction of mean OBB diagonal
+  min_obb_iou: 0.10
+  max_retries: 4
+  # Gemini free tier is ~15 requests/minute per model. In crew mode the agents'
+  # own reasoning calls share this budget with detection, so keep headroom.
+  max_rpm: 10

@@ -1,0 +1,21 @@
+# secrets
+.env
+
+# model weights (~2.5 GB)
+checkpoints/
+
+# inputs and outputs
+data/
+out/
+video_examples/        # phone footage; tens of MB per clip, not for git
+
+# browser-verification artifacts
+.playwright-mcp/
+*-tab.png
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/

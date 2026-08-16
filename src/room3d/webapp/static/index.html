@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>room3d</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🧊</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">room3d</div>
+  <label class="field">
+    <span>Room</span>
+    <select id="room-select"></select>
+  </label>
+  <div id="room-stats" class="stats"></div>
+  <div class="spacer"></div>
+  <div id="status" class="status"></div>
+</header>
+
+<div class="layout">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="side-section">
+      <div class="side-head">
+        <h2>Objects <span id="object-count" class="pill">0</span></h2>
+        <button id="clear-selection" class="link" title="Clear selection">clear</button>
+      </div>
+      <input id="object-filter" type="search" placeholder="Filter by label…" autocomplete="off">
+      <div class="slider-row">
+        <label>Min confidence <output id="out-conf">0.00</output></label>
+        <input id="filter-conf" type="range" min="0" max="1" step="0.01" value="0">
+      </div>
+      <div class="slider-row">
+        <label>Min observations <output id="out-obs">1</output></label>
+        <input id="filter-obs" type="range" min="1" max="10" step="1" value="1">
+      </div>
+      <ul id="object-list" class="object-list"></ul>
+    </div>
+
+    <details class="side-section" id="refuse-panel">
+      <summary><h2>Re-fusion</h2></summary>
+      <p class="hint">
+        Re-clusters the cached observations. No VLM calls, so this is instant and free.
+      </p>
+      <div class="slider-row">
+        <label>Merge radius floor (m) <output id="out-rf">0.30</output></label>
+        <input id="rf" type="range" min="0.05" max="5" step="0.05" value="0.30">
+      </div>
+      <div class="slider-row">
+        <label>Radius scale (× OBB diag) <output id="out-rs">0.50</output></label>
+        <input id="rs" type="range" min="0" max="3" step="0.05" value="0.50">
+      </div>
+      <p class="hint" id="radius-note"></p>
+      <div class="slider-row">
+        <label>Min OBB IoU <output id="out-iou">0.10</output></label>
+        <input id="iou" type="range" min="0" max="1" step="0.01" value="0.10">
+      </div>
+      <div class="button-row">
+        <button id="btn-refuse" class="primary">Re-fuse</button>
+        <button id="btn-save" title="Overwrites objects.json, keeping objects.prev.json">Save</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+      <div id="refuse-result" class="hint"></div>
+    </details>
+  </aside>
+
+  <main class="content">
+    <nav class="tabs" id="tabs">
+      <button data-tab="run">Run</button>
+      <button data-tab="frames" class="active">Frames</button>
+      <button data-tab="cloud">Point cloud</button>
+      <button data-tab="plan">Floor plan</button>
+      <button data-tab="traj">Trajectory</button>
+    </nav>
+
+    <!-- Run -->
+    <section class="panel" data-panel="run">
+      <div class="form-grid">
+        <label class="field"><span>Video</span><select id="run-video"></select></label>
+        <label class="field"><span>Room name</span><input id="run-room" placeholder="living_2"></label>
+        <label class="field"><span>Frames</span><input id="run-frames" type="number" value="8" min="2" max="200"></label>
+        <label class="field checkbox"><input id="run-direct" type="checkbox" checked><span>Direct mode (skip agent loop — far cheaper on quota)</span></label>
+        <label class="field checkbox"><input id="run-mixed" type="checkbox"><span>Allow mixed orientations</span></label>
+        <div class="button-row">
+          <button id="btn-run" class="primary">Start run</button>
+          <button id="btn-cancel">Cancel</button>
+        </div>
+      </div>
+      <div id="run-estimate" class="hint"></div>
+      <div class="run-progress" id="run-progress"></div>
+      <pre class="log" id="run-log">No run started in this session.</pre>
+    </section>
+
+    <!-- Frames -->
+    <section class="panel active" data-panel="frames">
+      <div class="toolbar">
+        <label class="checkbox"><input id="show-boxes" type="checkbox" checked><span>Show detection boxes</span></label>
+        <label class="checkbox"><input id="dim-unselected" type="checkbox" checked><span>Dim unselected</span></label>
+        <span id="frames-note" class="hint"></span>
+      </div>
+      <div id="frame-grid" class="frame-grid"></div>
+    </section>
+
+    <!-- Point cloud -->
+    <section class="panel" data-panel="cloud">
+      <div class="toolbar">
+        <label>Points <output id="out-maxpts">300k</output>
+          <input id="max-points" type="range" min="50000" max="1500000" step="50000" value="300000"></label>
+        <label>Size <input id="point-size" type="range" min="0.001" max="0.05" step="0.001" value="0.008"></label>
+        <label class="checkbox"><input id="show-boxes-3d" type="checkbox" checked><span>Object boxes</span></label>
+        <label class="checkbox"><input id="show-cams" type="checkbox" checked><span>Cameras</span></label>
+        <button id="btn-recentre">Recentre</button>
+        <span id="cloud-note" class="hint"></span>
+      </div>
+      <div id="cloud-canvas" class="viewport"></div>
+    </section>
+
+    <!-- Floor plan -->
+    <section class="panel" data-panel="plan">
+      <div class="toolbar">
+        <label class="field inline"><span>Up axis</span>
+          <select id="plan-up"><option value="">auto</option><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select>
+        </label>
+        <label>Drop ceiling <output id="out-ceil">15%</output>
+          <input id="plan-ceiling" type="range" min="0" max="0.6" step="0.05" value="0.15"></label>
+        <label class="checkbox"><input id="plan-footprints" type="checkbox" checked><span>Footprints</span></label>
+        <span id="plan-note" class="hint"></span>
+      </div>
+      <div id="plan-warning"></div>
+      <div id="plan-wrap" class="plan-wrap"></div>
+    </section>
+
+    <!-- Trajectory -->
+    <section class="panel" data-panel="traj">
+      <div id="traj-stats" class="stat-grid"></div>
+      <div id="traj-warning"></div>
+      <div class="traj-split">
+        <div id="traj-canvas" class="viewport"></div>
+        <div class="traj-table-wrap"><table class="traj-table" id="traj-table"></table></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.js" } }
+</script>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
