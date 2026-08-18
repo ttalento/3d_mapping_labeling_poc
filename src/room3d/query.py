@@ -21,7 +21,7 @@ when the phrase matches nothing, or when explicitly forced.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from .consensus import View
 from .fusion import default_label_compatible, normalize_label
@@ -81,3 +81,52 @@ def cached_views(
             )
         )
     return views
+
+
+def _box_area(box_px: tuple[int, int, int, int]) -> int:
+    x0, y0, x1, y1 = box_px
+    return max(x1 - x0, 0) * max(y1 - y0, 0)
+
+
+def group_instances(
+    views: Sequence[View],
+    recon,
+    *,
+    min_agreement: float = 0.3,
+    occlusion_tol: float = 0.10,
+    max_points: int = 2000,
+) -> list[list[View]]:
+    """Split the matched detections into distinct physical objects.
+
+    "chair" matches every chair in the room. Which detections are the *same*
+    chair is decided by `agreement_between` -- the same cross-view vote used to
+    carve -- rather than by centroid distance. That matters because centroid
+    distance is only a proxy for the question, and it is the proxy that puts one
+    couch in the object list twice.
+
+    Greedy, largest box first, so well-supported detections seed the groups and
+    marginal ones attach to them. `fusion.cluster_observations` orders itself the
+    same way and for the same reason.
+    """
+    from .consensus import agreement_between
+
+    groups: list[list[View]] = []
+
+    for view in sorted(views, key=lambda v: -_box_area(v.box_px)):
+        best: list[View] | None = None
+        best_score = min_agreement
+
+        for group in groups:
+            score = agreement_between(
+                [view], group, recon,
+                occlusion_tol=occlusion_tol, max_points=max_points,
+            )
+            if score >= best_score:
+                best, best_score = group, score
+
+        if best is None:
+            groups.append([view])
+        else:
+            best.append(view)
+
+    return sorted(groups, key=lambda g: -len(g))
