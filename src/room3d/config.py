@@ -62,10 +62,30 @@ class LabelConfig:
 
 
 @dataclass
+class QueryConfig:
+    """Knobs for `room3d query`.
+
+    `min_vote` is the one that matters and the one that is genuinely uncertain:
+    it is the fraction of the frames that could see a point which must agree it
+    is inside the box. Unanimity destroys small objects seen by few cameras;
+    zero carves nothing. It is tuned against one room, so every query reports its
+    vote statistics rather than leaving this a magic number.
+    """
+
+    min_vote: float = 0.6
+    occlusion_tol: float = 0.10          # relative depth slack in the z-buffer test
+    keep_largest_component: bool = True
+    component_voxel: float = 0.04        # metres
+    min_instance_agreement: float = 0.3  # above this, two view-sets are one object
+    max_agreement_points: int = 2000     # grouping is pairwise; this caps the cost
+
+
+@dataclass
 class Config:
     frames: FramesConfig = field(default_factory=FramesConfig)
     reconstruct: ReconstructConfig = field(default_factory=ReconstructConfig)
     label: LabelConfig = field(default_factory=LabelConfig)
+    query: QueryConfig = field(default_factory=QueryConfig)
 
 
 def _build(cls, data: dict[str, Any]):
@@ -84,4 +104,5 @@ def load_config(path: str | Path | None = None) -> Config:
         frames=_build(FramesConfig, raw.get("frames", {})),
         reconstruct=_build(ReconstructConfig, raw.get("reconstruct", {})),
         label=_build(LabelConfig, raw.get("label", {})),
+        query=_build(QueryConfig, raw.get("query", {})),
     )
