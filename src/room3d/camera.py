@@ -94,10 +94,14 @@ def visible_in_frame(
     if len(pts) == 0:
         return uv, in_view
 
-    # Clipped so the lookup is always in bounds; `in_view` discards the results
-    # for anything that was actually outside.
-    ui = np.clip(uv[:, 0], 0, width - 1).astype(np.intp)
-    vi = np.clip(uv[:, 1], 0, height - 1).astype(np.intp)
+    # A point at the camera centre divides by zero in project_to_frame and comes
+    # back nan; `in_view` already marks it False, but casting nan to an integer
+    # index is undefined (it truncates to INT_MIN on this platform) and raises
+    # an IndexError. Swap non-finite coordinates for a harmless in-range index
+    # first -- the lookup result is discarded by `in_view` below regardless.
+    finite_uv = np.where(np.isfinite(uv), uv, 0.0)
+    ui = np.clip(finite_uv[:, 0], 0, width - 1).astype(np.intp)
+    vi = np.clip(finite_uv[:, 1], 0, height - 1).astype(np.intp)
 
     centre = np.asarray(recon.poses[frame], dtype=np.float64)[:3, 3]
     depth = np.linalg.norm(pts - centre[None, :], axis=1)

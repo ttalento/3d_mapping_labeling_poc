@@ -144,3 +144,15 @@ def test_empty_input_returns_empty_arrays():
     uv, seen = visible_in_frame(np.zeros((0, 3)), recon, 0)
     assert uv.shape == (0, 2)
     assert seen.shape == (0,)
+
+
+def test_a_point_at_the_camera_center_is_not_visible(recwarn):
+    """Divides by zero in project_to_frame, coming back nan/not-in-view.
+
+    Regression: the clipped pixel lookup used to cast that nan straight to an
+    integer index and crash with an IndexError instead of returning False.
+    """
+    recon = make_recon(flat_wall(2.0))
+    uv, seen = visible_in_frame(np.array([[0.0, 0.0, 0.0]]), recon, 0)
+    assert not seen[0]
+    assert not any(issubclass(w.category, RuntimeWarning) for w in recwarn.list)
