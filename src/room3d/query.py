@@ -21,12 +21,26 @@ when the phrase matches nothing, or when explicitly forced.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
-from .consensus import View
+import numpy as np
+
+from .artifacts import load_frames_npz
+from .config import QueryConfig
+from .consensus import View, carve
 from .fusion import default_label_compatible, normalize_label
+from .level import estimate_up
+from .projection import OrientedBox, fit_gravity_aligned_box, snap_to_floor
 
 _ARTICLES = ("the ", "a ", "an ")
+
+# Matches LabelConfig.min_level_confidence. Below this the levelling estimate is
+# not worth acting on, and a box levelled against a wrong gravity vector is worse
+# than an unlevelled one.
+MIN_LEVEL_CONFIDENCE = 0.25
 
 
 def normalize_phrase(phrase: str) -> str:
@@ -130,3 +144,202 @@ def group_instances(
             best.append(view)
 
     return sorted(groups, key=lambda g: -len(g))
+
+
+@dataclass
+class QueryMatch:
+    """One physical object the query found, and the evidence behind it."""
+
+    label: str
+    obb: OrientedBox | None
+    score: float
+    views: list[View]
+    n_points: int
+    vote_stats: dict
+    absorbed_object_ids: list[str] = field(default_factory=list)
+    supported: bool = True
+
+    def as_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "obb": self.obb.as_dict() if self.obb is not None else None,
+            "score": round(float(self.score), 4),
+            "n_views": len(self.views),
+            "n_points": int(self.n_points),
+            "frames": sorted({v.frame_idx for v in self.views}),
+            "boxes": {str(v.frame_idx): list(v.box_px) for v in self.views},
+            "vote_stats": self.vote_stats,
+            "absorbed_object_ids": list(self.absorbed_object_ids),
+            "supported": bool(self.supported),
+        }
+
+
+@dataclass
+class QueryResult:
+    phrase: str
+    matches: list[QueryMatch]
+    source: str                       # "cache" | "vlm" | "none"
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "phrase": self.phrase,
+            "source": self.source,
+            "matches": [m.as_dict() for m in self.matches],
+            "notes": list(self.notes),
+        }
+
+
+def query_room(
+    room_dir: str | Path,
+    phrase: str,
+    *,
+    config: QueryConfig | None = None,
+    config_overrides: dict | None = None,
+    detector=None,
+    force: bool = False,
+    label_compatible: Callable[[str, str], bool] = default_label_compatible,
+    verbose: bool = True,
+) -> QueryResult:
+    """Find `phrase` in a labelled room and return its box, best match first.
+
+    Reads only. Promoting a match into `objects.json` is `commit_match`'s job,
+    and keeping them separate is what makes a vague query free rather than
+    destructive.
+    """
+    room_dir = Path(room_dir)
+    npz = room_dir / "frames.npz"
+    obs_path = room_dir / "observations.json"
+    if not npz.exists():
+        raise FileNotFoundError(f"{npz} not found; reconstruct this room first")
+    if not obs_path.exists():
+        raise FileNotFoundError(f"{obs_path} not found; label this room first")
+
+    config = config or QueryConfig()
+    if config_overrides:
+        config = replace(config, **config_overrides)
+
+    recon = load_frames_npz(npz)
+    doc = json.loads(obs_path.read_text())
+    notes: list[str] = []
+
+    views: list[View] = []
+    source = "none"
+    if not force:
+        views = cached_views(doc, phrase, label_compatible=label_compatible)
+        if views:
+            source = "cache"
+
+    if not views:
+        if detector is None:
+            notes.append(
+                "nothing cached matches that phrase, and no detector is "
+                "available to look for it -- this is not the same as the object "
+                "being absent from the room"
+            )
+            return QueryResult(phrase, [], "none", notes)
+        views = _vlm_views(recon, doc, phrase, detector, notes)
+        source = "vlm"
+
+    up, floor_height = _scene_frame(recon, notes)
+
+    matches = [
+        _build_match(group, recon, up, floor_height, config)
+        for group in group_instances(
+            views, recon,
+            min_agreement=config.min_instance_agreement,
+            occlusion_tol=config.occlusion_tol,
+            max_points=config.max_agreement_points,
+        )
+    ]
+    matches.sort(key=lambda m: -m.score)
+
+    if verbose:
+        print(f"[query] {phrase!r} -> {len(matches)} match(es) from {source}")
+        for i, m in enumerate(matches, 1):
+            size = "unsupported" if m.obb is None else np.round(m.obb.extent, 3).tolist()
+            print(f"[query]   {i}. {m.label:<16} score={m.score:.2f} "
+                  f"views={len(m.views)} extent={size}")
+        for note in notes:
+            print(f"[query] note: {note}")
+
+    return QueryResult(phrase, matches, source, notes)
+
+
+def _scene_frame(recon, notes: list[str]):
+    """`(up, floor_height)` for the room, or `(None, None)` if untrustworthy."""
+    estimate = estimate_up(recon.pts3d[recon.conf_mask], recon.poses)
+    if estimate.confidence < MIN_LEVEL_CONFIDENCE:
+        notes.append(
+            f"up estimate too weak to trust ({estimate.confidence:.2f}); "
+            "the box will not be levelled"
+        )
+        return None, None
+    return estimate.up, float(estimate.floor_offset)
+
+
+def _build_match(group, recon, up, floor_height, config: QueryConfig) -> QueryMatch:
+    """Carve one instance's points and wrap a box around what survives."""
+    result = carve(
+        group, recon,
+        min_vote=config.min_vote,
+        occlusion_tol=config.occlusion_tol,
+        keep_largest=config.keep_largest_component,
+        voxel=config.component_voxel,
+    )
+    kept, stats = result.points, result.stats
+
+    absorbed = sorted({v.object_id for v in group if v.object_id})
+    label = _dominant_label(group)
+
+    if len(kept) < 3:
+        # Found in 2D and unsupportable in 3D. Reporting it as a match with
+        # supported=False says that; returning nothing would say "not present".
+        return QueryMatch(label, None, 0.0, list(group), 0, stats, absorbed, False)
+
+    if up is None:
+        from .projection import fit_oriented_box
+
+        obb = fit_oriented_box(kept)
+    else:
+        obb = fit_gravity_aligned_box(kept, up)
+        if floor_height is not None:
+            obb = snap_to_floor(obb, floor_height, up)
+
+    return QueryMatch(
+        label=label,
+        obb=obb,
+        score=_score(group, stats["mean_vote"]),
+        views=list(group),
+        n_points=int(len(kept)),
+        vote_stats=stats,
+        absorbed_object_ids=absorbed,
+        supported=True,
+    )
+
+
+def _dominant_label(group: Sequence[View]) -> str:
+    counts: dict[str, int] = {}
+    for view in group:
+        name = normalize_label(view.label)
+        counts[name] = counts.get(name, 0) + 1
+    return max(counts.items(), key=lambda kv: (kv[1], -len(kv[0])))[0] if counts else ""
+
+
+def _score(group: Sequence[View], mean_vote: float) -> float:
+    """A within-query ranking key. Not a probability, not comparable across queries.
+
+    Geometric mean of three independent signals -- how many views support the
+    match, how strongly the surviving points are agreed on, and how sure the VLM
+    was. `_cluster_confidence` in `fusion.py` combines its terms the same way and
+    for the same reason: a match that fails any one of them must not be rescued
+    by the other two.
+    """
+    view_score = 1.0 - np.exp(-len(group) / 2.0)
+    vlm_score = float(np.mean([v.vlm_confidence for v in group])) if group else 0.0
+    terms = (max(view_score, 1e-6), max(mean_vote, 1e-6), max(vlm_score, 1e-6))
+    return float(np.clip(np.prod(terms) ** (1 / 3), 0.0, 1.0))
+
+
+def _vlm_views(recon, doc, phrase, detector, notes: list[str]) -> list[View]:
+    raise NotImplementedError("targeted detection lands in Task 9")

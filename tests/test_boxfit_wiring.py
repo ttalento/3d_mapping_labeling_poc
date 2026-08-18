@@ -66,11 +66,29 @@ def build_recon() -> Reconstruction:
 
     poses = np.tile(np.eye(4, dtype=np.float32), (N, 1, 1))
     poses[:, 0, 3] = np.linspace(-1.0, 1.0, N)
+    # A proper (det = +1) 180-degree rotation about the world Z axis: local +Y
+    # (down the image) maps to world -Y, i.e. world +Y is up; local +Z (forward)
+    # maps to world +Z, which is where this room's geometry actually lives (z in
+    # 1..8). Flipping only Y, as an earlier version of this fixture did, points
+    # the camera's forward axis at world -Z instead -- behind every camera, so a
+    # frame cannot even see the points it supposedly recorded. That was invisible
+    # to every test above, none of which reprojects through the camera model; it
+    # surfaces as soon as something does (room3d.camera.visible_in_frame, used by
+    # consensus.py's cross-view agreement).
+    poses[:, 0, 0] = -1.0
     poses[:, 1, 1] = -1.0                              # camera +Y is down, world +Y up
-    poses[:, 2, 2] = -1.0
 
+    # A short focal length, not the tighter 50 that was here before real camera
+    # reprojection was ever exercised against this room. Each frame's box is a
+    # single fixed pixel window (`sofa_detection` is reused verbatim for every
+    # frame, the way a box-fit-only fixture can afford to), not one that tracks
+    # the sofa's true per-frame parallax the way a real detector's boxes would.
+    # A wide field of view keeps that fixed window forgiving enough of the
+    # resulting few-pixel shifts between frames for cross-view agreement to still
+    # recognise the four partial views as one object; box-fit itself never reads
+    # these intrinsics; only Task 8's consensus voting does.
     intrinsics = np.tile(
-        np.array([[50, 0, W / 2], [0, 50, H / 2], [0, 0, 1]], dtype=np.float32), (N, 1, 1)
+        np.array([[20, 0, W / 2], [0, 20, H / 2], [0, 0, 1]], dtype=np.float32), (N, 1, 1)
     )
     return Reconstruction(
         images=np.full((N, H, W, 3), 128, dtype=np.uint8),
