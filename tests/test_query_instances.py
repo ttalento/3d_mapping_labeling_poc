@@ -60,14 +60,39 @@ def test_repeated_sightings_of_one_object_form_one_instance():
 
 
 def test_two_separate_objects_form_two_instances():
-    recon = make_recon([-0.3, 0.0, 0.3])
+    """Object A lives in frames 0-1, object B in frames 2-3: no frame is
+    shared, so neither side's frames are a subset of the other's and
+    `agreement_between` cannot short-circuit on frame overlap (see
+    `agreement_between`'s "wholly contained" rule). This has to be true or the
+    assertion below would hold no matter where the boxes actually are -- the
+    companion test right after this one is the proof that it does not.
+    """
+    b = 0.15
+    recon = make_recon([-3 * b, -b, b, 3 * b])
     left = np.array([-1.2, 0.0, 4.0])
     right = np.array([1.2, 0.0, 4.0])
 
-    views = [View(i, box_around(left, recon, i), label="chair") for i in range(3)]
-    views += [View(i, box_around(right, recon, i), label="chair") for i in range(3)]
+    views = [View(i, box_around(left, recon, i), label="chair") for i in range(2)]
+    views += [View(i, box_around(right, recon, i), label="chair") for i in range(2, 4)]
 
     assert len(group_instances(views, recon)) == 2
+
+
+def test_objects_at_the_same_point_merge_into_one_instance():
+    """The mirror of the test above, same frame split (0-1 / 2-3) so nothing
+    is forced apart by frame overlap -- only the target moved, from two
+    distinct points to one. If this did not merge while the separation test
+    above still split, the split above would be proof of nothing: a test that
+    cannot fail when the thing it guards is broken is not a guard.
+    """
+    b = 0.15
+    recon = make_recon([-3 * b, -b, b, 3 * b])
+    same = np.array([0.0, 0.0, 4.0])
+
+    views = [View(i, box_around(same, recon, i), label="chair") for i in range(2)]
+    views += [View(i, box_around(same, recon, i), label="chair") for i in range(2, 4)]
+
+    assert len(group_instances(views, recon)) == 1
 
 
 def test_two_detections_in_the_same_frame_are_always_separate_instances():
