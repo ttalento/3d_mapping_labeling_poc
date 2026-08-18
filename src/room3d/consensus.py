@@ -249,6 +249,66 @@ def carve(
     return CarveResult(kept, kept_source, stats)
 
 
+def agreement_between(
+    views_a: Sequence[View],
+    views_b: Sequence[View],
+    recon,
+    *,
+    occlusion_tol: float = 0.10,
+    max_points: int = 2000,
+) -> float:
+    """Do these two sets of boxes describe the same physical object? 0 to 1.
+
+    The same vote as `carve`, asked across two candidates instead of within one.
+    If A's points land inside B's boxes wherever B can see them, and B's inside
+    A's, they are one object seen twice -- which is exactly the evidence that
+    `fusion.py`'s centroid-distance test is only a proxy for.
+
+    Symmetric by taking the **minimum** of the two directions, never the mean. A
+    speaker sitting inside a cabinet scores near 1.0 speaker-to-cabinet, because
+    every speaker point really is inside the cabinet's box; the mean would merge
+    them into one object and the minimum will not.
+
+    Subsampled because grouping compares every pair of candidates, and the
+    quadratic term is what would make a query feel slow.
+    """
+    from .projection import subsample
+
+    def directional(source_views, target_views) -> float:
+        points, _ = candidate_points(source_views, recon)
+        if len(points) == 0 or not target_views:
+            return 0.0
+        points = subsample(points, max_points)
+
+        # The source frames abstain: a point is inside the box it came from by
+        # construction, and two detections in the same frame are two objects.
+        source = np.full(len(points), -1, dtype=np.int64)
+        agree, testable = vote(
+            points, target_views, recon,
+            occlusion_tol=occlusion_tol, source=source,
+        )
+        judged = testable > 0
+        if not judged.any():
+            return 0.0
+        return float((agree[judged] / testable[judged]).mean())
+
+    frames_a = {v.frame_idx for v in views_a}
+    shared = [v for v in views_b if v.frame_idx in frames_a]
+    if shared and len(shared) == len(views_b):
+        # Every box on one side is in a frame the other side already claims.
+        # The detector called those separate objects; nothing here overrules it.
+        return 0.0
+
+    b_minus_a = [v for v in views_b if v.frame_idx not in frames_a]
+    frames_b = {v.frame_idx for v in views_b}
+    a_minus_b = [v for v in views_a if v.frame_idx not in frames_b]
+
+    return min(
+        directional(views_a, b_minus_a),
+        directional(views_b, a_minus_b),
+    )
+
+
 def _mean_vote(points, source, views, recon, occlusion_tol: float) -> float:
     """Average agreement across the points that survived, leave-one-out."""
     if len(points) == 0:

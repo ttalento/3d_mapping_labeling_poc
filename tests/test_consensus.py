@@ -314,3 +314,82 @@ def test_largest_component_coarsens_rather_than_allocating_a_vast_grid():
 def test_largest_component_handles_too_few_points_to_cluster():
     assert largest_component(np.zeros((1, 3))).all()
     assert largest_component(np.zeros((0, 3))).shape == (0,)
+
+
+# --- the identity test ---------------------------------------------------------
+
+from room3d.consensus import agreement_between
+
+# Baseline 0.15, not the 1.5 used in the brief. `make_recon`'s backdrop is flat
+# at depth 100 -- there is no geometry at the target's own depth (4), so
+# `candidate_points` harvests backdrop pixels from inside a box that was
+# centred on where the *target* projects, not on anything actually at that
+# depth. Reprojecting those backdrop points into the other frame lands them
+# offset from that frame's own target-centred box by
+# `fx * (c1 - c0) * (1/Z_target - 1/depth)` = `9.6 * (c1 - c0)` px for this
+# K and target depth -- the backdrop parallax (depth 100) and the box's own
+# parallax (depth 4) disagree, and the mismatch grows with baseline. At 1.5
+# (c1 - c0 = 3.0) that is ~29px against a 12px box: zero overlap, so agreement
+# is always 0 regardless of implementation. At 0.5, the baseline the same
+# defect was fixed with elsewhere in this file, it is still ~10px: only ~13%
+# overlap, well under the 0.7 bar. Overlap only clears 0.7 below baseline
+# ~0.19; 0.15 lands mid-plateau there (min direction = 9/12 = 0.75) with
+# margin on both sides -- confirmed against the real `candidate_points`/`vote`
+# pair before writing this fixture, not assumed.
+_IDENTITY_BASELINE = 0.15
+
+
+def test_two_views_of_the_same_object_agree_strongly():
+    recon = make_recon([camera_at(-_IDENTITY_BASELINE), camera_at(_IDENTITY_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+
+    a = [View(0, box_around(target, recon, 0))]
+    b = [View(1, box_around(target, recon, 1))]
+    assert agreement_between(a, b, recon) > 0.7
+
+
+def test_views_of_two_different_objects_do_not_agree():
+    recon = make_recon([camera_at(-_IDENTITY_BASELINE), camera_at(_IDENTITY_BASELINE)])
+    left = np.array([-1.0, 0.0, 4.0])
+    right = np.array([1.5, 0.0, 4.0])
+
+    a = [View(0, box_around(left, recon, 0))]
+    b = [View(1, box_around(right, recon, 1))]
+    assert agreement_between(a, b, recon) < 0.3
+
+
+def test_agreement_is_symmetric():
+    recon = make_recon([camera_at(-_IDENTITY_BASELINE), camera_at(_IDENTITY_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+    a = [View(0, box_around(target, recon, 0))]
+    b = [View(1, box_around(target, recon, 1))]
+
+    assert agreement_between(a, b, recon) == pytest.approx(
+        agreement_between(b, a, recon)
+    )
+
+
+def test_a_small_object_inside_a_large_one_is_not_merged_with_it():
+    """Every speaker point is inside the cabinet's box, so the speaker->cabinet
+    direction scores high. The reverse does not, and the minimum is what stops
+    the two becoming one object."""
+    recon = make_recon([camera_at(-_IDENTITY_BASELINE), camera_at(_IDENTITY_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+
+    large = [View(0, box_around(target, recon, 0, half=14))]
+    small = [View(1, box_around(target, recon, 1, half=2))]
+    assert agreement_between(small, large, recon) < 0.6
+
+
+def test_two_boxes_in_the_same_frame_never_merge():
+    """The detector already said these are two objects. Leave-one-out makes that
+    conclusion fall out rather than needing a special case."""
+    recon = make_recon([camera_at(0.0)])
+    a = [View(0, (5, 5, 15, 15))]
+    b = [View(0, (6, 6, 16, 16))]
+    assert agreement_between(a, b, recon) == 0.0
+
+
+def test_agreement_with_an_empty_side_is_zero():
+    recon = make_recon([camera_at(0.0)])
+    assert agreement_between([], [View(0, (5, 5, 15, 15))], recon) == 0.0
