@@ -19,7 +19,9 @@ from pathlib import Path
 
 import numpy as np
 
+from ..artifacts import load_observation_points
 from ..fusion import ObjectRecord, cluster_observations
+from ..level import UP_VECTOR, load_level_record
 from ..projection import Observation, OrientedBox
 
 
@@ -48,11 +50,14 @@ def load_observations(path: str | Path) -> ObservationSet:
     """Read observations.json back into the dataclasses fusion expects."""
     data = json.loads(Path(path).read_text())
     raw = data.get("observations", [])
+    # Written alongside the JSON by the pipeline. Without it re-fusion can only
+    # copy one frame's box; with it, it refits the same way the pipeline does.
+    points = load_observation_points(path)
 
     observations: list[Observation] = []
     boxes: list[tuple[int, int, int, int] | None] = []
 
-    for item in raw:
+    for i, item in enumerate(raw):
         box = item.get("box_px")
         box = tuple(int(v) for v in box) if box else None
         boxes.append(box)
@@ -66,6 +71,7 @@ def load_observations(path: str | Path) -> ObservationSet:
                 n_points=int(item.get("n_points", 0)),
                 support=float(item.get("support", 0.0)),
                 box_px=box,
+                points=points.get(int(item.get("id", i))),
             )
         )
 
@@ -87,6 +93,8 @@ def refuse(
     min_obb_iou: float = 0.10,
     min_confidence: float = 0.0,
     min_observations: int = 1,
+    up: np.ndarray | None = None,
+    floor_height: float | None = None,
 ) -> list[ObjectRecord]:
     """Re-cluster, then drop objects that fail the post-filters.
 
@@ -94,17 +102,37 @@ def refuse(
     weak on its own may still be the third sighting that makes a cluster
     credible, so removing it up front would change the clustering rather than
     just the display.
+
+    `up` and `floor_height` describe the room, not the thresholds being tuned;
+    pass `scene_frame_of` so a re-fused box matches what the pipeline writes.
     """
     objects = cluster_observations(
         obs_set.observations,
         radius_floor=radius_floor,
         radius_scale=radius_scale,
         min_obb_iou=min_obb_iou,
+        up=up,
+        floor_height=floor_height,
     )
     return [
         o for o in objects
         if o.confidence >= min_confidence and o.n_observations >= min_observations
     ]
+
+
+def scene_frame_of(room_dir: str | Path) -> tuple[np.ndarray | None, float | None]:
+    """`(up, floor_height)` for a room on disk, from its `level.json`.
+
+    Levelling already established which way is up and rewrote every artifact to
+    match, so a levelled room's answer is exactly +Y with the floor at 0. Reading
+    the record beats re-estimating: it is what the stored geometry was actually
+    built against. An unlevelled room returns `(None, None)`, and re-fusion falls
+    back to per-frame boxes rather than levelling against a guess.
+    """
+    record = load_level_record(room_dir)
+    if not record or record.get("convention") != "y_up_floor_at_zero":
+        return None, None
+    return UP_VECTOR.copy(), 0.0
 
 
 def radius_summary(

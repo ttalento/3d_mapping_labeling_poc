@@ -43,6 +43,17 @@ class LabelConfig:
     merge_radius_floor: float = 0.30     # metres
     merge_radius_scale: float = 0.50     # fraction of mean OBB diagonal
     min_obb_iou: float = 0.10
+
+    # --- 3D box fitting ---
+    # Furniture stands on a floor, so only its yaw is unknown. Locking the
+    # vertical axis to gravity beats letting PCA pick it from a partial view,
+    # which finds the axes of the visible surface rather than of the object.
+    gravity_aligned_boxes: bool = True
+    min_level_confidence: float = 0.25   # below this, fall back to PCA boxes
+    obb_percentile: float = 1.0          # trim this % off each end of every axis
+    max_points_per_observation: int = 2048   # per-frame cap, so fusion can pool
+    max_pooled_points: int = 20000       # cap on the pooled set fusion fits to
+    floor_snap_threshold: float = 0.15   # metres; 0 disables floor snapping
     max_retries: int = 4
     # Gemini's free tier allows ~15 requests/minute per model. The crew path
     # spends calls on agent reasoning *as well as* detection, so both have to

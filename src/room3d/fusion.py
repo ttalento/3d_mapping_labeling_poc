@@ -23,7 +23,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .projection import Observation, OrientedBox, fit_oriented_box
+from .projection import (
+    Observation,
+    OrientedBox,
+    fit_gravity_aligned_box,
+    snap_to_floor,
+    subsample,
+)
 
 # Deliberately small: this is a fallback for when the LLM adjudicator is absent
 # (unit tests, --no-llm-merge). The real synonym handling is the agent's job.
@@ -164,18 +170,36 @@ def cluster_observations(
     radius_floor: float = 0.30,
     radius_scale: float = 0.50,
     min_obb_iou: float = 0.10,
+    up: np.ndarray | None = None,
+    floor_height: float | None = None,
+    floor_snap_threshold: float = 0.15,
+    obb_percentile: float = 1.0,
+    max_pooled_points: int = 20_000,
 ) -> list[ObjectRecord]:
     """Greedy agglomerative clustering of observations into objects.
 
     An observation joins a cluster when geometry *and* label both agree:
-      - centroid within a size-adaptive radius of the cluster centroid, and
-      - either the boxes overlap (IoU >= min_obb_iou) or the centroid is
+      - centroid within a size-adaptive radius of the *nearest member* of the
+        cluster, and
+      - either the boxes overlap (IoU >= min_obb_iou) or that distance is
         comfortably inside the radius (which rescues thin objects whose
         axis-aligned envelopes barely intersect), and
       - the label is compatible with the cluster's existing labels.
 
+    Nearest member, not the mean of the cluster's centroids. A sofa filmed by
+    walking past it produces views that each overlap their neighbours and not the
+    far end; once two of them merge, their mean sits between them, and every
+    later view is measured from a place no observation ever was. The far half of
+    the sofa then splits off as a second sofa. What the gate is actually asking
+    is whether this view coincides with something already in the cluster, and
+    that is a question about members.
+
     Observations are processed most-supported first, so well-grounded detections
     seed the clusters and marginal ones attach to them rather than the reverse.
+
+    `up` and `floor_height` govern the *final* box only, not the clustering.
+    Given them, each object's box is refit to the pooled points of every
+    observation in its cluster, level with gravity and resting on the floor.
     """
     # Carry the caller's index alongside each observation so the finished record
     # can point back at the exact observations -- and therefore the exact 2D
@@ -195,8 +219,9 @@ def cluster_observations(
 
             members = [c for _, c in cluster]
             radius = _merge_radius(members + [obs], radius_floor, radius_scale)
-            cluster_centroid = np.mean([c.centroid for c in members], axis=0)
-            distance = float(np.linalg.norm(obs.centroid - cluster_centroid))
+            distance = min(
+                float(np.linalg.norm(obs.centroid - c.centroid)) for c in members
+            )
             if distance > radius:
                 continue
 
@@ -212,8 +237,44 @@ def cluster_observations(
         else:
             target.append((idx, obs))
 
-    return [_finalise(f"obj_{i:03d}", c, canonicalize, radius_floor, radius_scale)
-            for i, c in enumerate(sorted(clusters, key=lambda c: -len(c)))]
+    return [
+        _finalise(
+            f"obj_{i:03d}", c, canonicalize, radius_floor, radius_scale,
+            up=up,
+            floor_height=floor_height,
+            floor_snap_threshold=floor_snap_threshold,
+            obb_percentile=obb_percentile,
+            max_pooled_points=max_pooled_points,
+        )
+        for i, c in enumerate(sorted(clusters, key=lambda c: -len(c)))
+    ]
+
+
+def _fuse_box(
+    cluster: Sequence[Observation],
+    up: np.ndarray | None,
+    floor_height: float | None,
+    floor_snap_threshold: float,
+    obb_percentile: float,
+    max_pooled_points: int,
+) -> OrientedBox:
+    """One box for the whole cluster, fit to everything every frame saw.
+
+    The only honest way to build this is from points. Averaging per-frame boxes
+    cannot work: their extents are expressed along *different* axes, so an
+    element-wise combination of two of them describes no box at all. Where the
+    points are unavailable -- re-fusion from `observations.json`, or a synthetic
+    test -- the fallback is a box that genuinely existed rather than a mixture.
+    """
+    pooled = [o.points for o in cluster if o.points is not None and len(o.points)]
+    if not pooled or up is None:
+        return max(cluster, key=lambda o: o.obb.diagonal).obb
+
+    points = subsample(np.vstack(pooled), max_pooled_points)
+    obb = fit_gravity_aligned_box(points, up, percentile=obb_percentile)
+    if floor_height is not None:
+        obb = snap_to_floor(obb, floor_height, up, threshold=floor_snap_threshold)
+    return obb
 
 
 def _finalise(
@@ -222,6 +283,12 @@ def _finalise(
     canonicalize: Callable[[Sequence[str]], str],
     radius_floor: float,
     radius_scale: float,
+    *,
+    up: np.ndarray | None = None,
+    floor_height: float | None = None,
+    floor_snap_threshold: float = 0.15,
+    obb_percentile: float = 1.0,
+    max_pooled_points: int = 20_000,
 ) -> ObjectRecord:
     ids = [i for i, _ in indexed_cluster]
     cluster = [o for _, o in indexed_cluster]
@@ -230,22 +297,11 @@ def _finalise(
     canonical = canonicalize(labels)
     aliases = sorted({normalize_label(l) for l in labels} - {normalize_label(canonical)})
 
-    # Refit the box over every cluster centroid rather than averaging the
-    # per-frame boxes: partial views produce boxes that are each individually
-    # too small, and averaging them keeps them too small.
     centroids = np.stack([o.centroid for o in cluster])
     radius = _merge_radius(cluster, radius_floor, radius_scale)
-
-    if len(cluster) >= 3:
-        obb = fit_oriented_box(centroids)
-        widest = max(cluster, key=lambda o: o.obb.diagonal).obb
-        obb = OrientedBox(
-            center=centroids.mean(axis=0),
-            extent=np.maximum(obb.extent, widest.extent),
-            R=widest.R,
-        )
-    else:
-        obb = max(cluster, key=lambda o: o.obb.diagonal).obb
+    obb = _fuse_box(
+        cluster, up, floor_height, floor_snap_threshold, obb_percentile, max_pooled_points
+    )
 
     return ObjectRecord(
         id=obj_id,

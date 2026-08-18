@@ -57,6 +57,13 @@ class Observation:
     `box_px` is carried through from the detection so the viewer can draw the
     object back onto the frame it came from. It is provenance, not input to any
     computation here.
+
+    `points` are the surviving 3D points, subsampled. They exist so fusion can
+    fit the final box to the *union* of what every frame saw. Without them a
+    fused box can only ever be a copy of one frame's box or an average of
+    quantities expressed in different axis frames, and the second of those is
+    meaningless. They are deliberately not serialised into `as_dict`: one
+    observation's points outweigh the whole JSON document.
     """
     frame_idx: int
     label: str
@@ -66,6 +73,7 @@ class Observation:
     n_points: int
     support: float            # fraction of the detection's pixels that survived
     box_px: tuple[int, int, int, int] | None = None    # x0, y0, x1, y1
+    points: np.ndarray | None = None                   # (M, 3), M <= max_points
 
     def as_dict(self) -> dict:
         return {
@@ -200,6 +208,143 @@ def fit_oriented_box(points: np.ndarray) -> OrientedBox:
     return OrientedBox(center, extent, R)
 
 
+def box_corners(obb: OrientedBox) -> np.ndarray:
+    """The eight corners of an oriented box, in world coordinates. (8, 3)."""
+    signs = np.array(
+        [[sx, sy, sz] for sx in (-0.5, 0.5) for sy in (-0.5, 0.5) for sz in (-0.5, 0.5)]
+    )
+    return (signs * obb.extent[None, :]) @ obb.R.T + obb.center[None, :]
+
+
+def points_inside_fraction(obb: OrientedBox, points: np.ndarray, tol: float = 1e-6) -> float:
+    """Share of `points` lying inside the box. The coherence check on any fit.
+
+    A box whose centre, extent and rotation came from different sources can look
+    plausible in isolation and still contain almost none of the geometry it
+    claims to describe, which is the only thing that actually matters.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if pts.size == 0:
+        return 1.0
+    local = (pts - obb.center[None, :]) @ obb.R
+    half = obb.extent / 2.0 + tol
+    return float((np.abs(local) <= half[None, :]).all(axis=1).mean())
+
+
+def _ground_basis(up: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """An orthonormal frame with `up` as its second axis."""
+    u = np.asarray(up, dtype=np.float64).reshape(3)
+    u = u / max(np.linalg.norm(u), 1e-12)
+
+    seed = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 0.0, 1.0])
+    e1 = seed - (seed @ u) * u
+    e1 /= max(np.linalg.norm(e1), 1e-12)
+    return u, e1, np.cross(u, e1)
+
+
+def fit_gravity_aligned_box(
+    points: np.ndarray,
+    up: np.ndarray,
+    *,
+    percentile: float = 1.0,
+    yaw_step_deg: float = 1.0,
+) -> OrientedBox:
+    """Minimum-footprint box around `points` with one axis locked to `up`.
+
+    Three deliberate departures from a plain PCA box:
+
+    - **Gravity, not the data, fixes the vertical axis.** PCA on a partial view
+      finds the axes of the *visible surface* -- a sofa seen from the front is a
+      slab, and its principal axes describe the slab, not the sofa. Furniture
+      stands on a floor, so only the yaw is genuinely unknown.
+    - **Yaw comes from the smallest footprint**, swept at `yaw_step_deg`. This is
+      rotating calipers with a fixed step, which is the right trade here: the
+      exact-minimum algorithm needs a convex hull and buys nothing at the
+      accuracy the point clouds support.
+    - **Extents come from percentiles, not min/max**, so the handful of pixels
+      that leaked onto the wall behind the object cannot stretch the box across
+      the room. `percentile=0` reproduces min/max exactly.
+
+    The returned rotation has `up` as column 1 and is right-handed.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    pts = pts[np.isfinite(pts).all(axis=1)]
+
+    u, e1, e2 = _ground_basis(up)
+    if len(pts) == 0:
+        return OrientedBox(np.zeros(3), np.zeros(3), np.column_stack([e1, u, np.cross(e1, u)]))
+
+    lo_q, hi_q = float(percentile), 100.0 - float(percentile)
+
+    a, b = pts @ e1, pts @ e2
+    angles = np.radians(np.arange(0.0, 90.0, max(yaw_step_deg, 1e-3)))
+    cos, sin = np.cos(angles)[:, None], np.sin(angles)[:, None]
+
+    # (n_angles, n_points): every candidate yaw evaluated at once. The two rows
+    # are the coordinates along `right` and `forward` below -- the signs have to
+    # match those axes exactly, or the extents come out right and the centre
+    # lands somewhere else entirely.
+    x = a[None, :] * cos + b[None, :] * sin
+    z = a[None, :] * sin - b[None, :] * cos
+
+    x_lo, x_hi = np.percentile(x, [lo_q, hi_q], axis=1)
+    z_lo, z_hi = np.percentile(z, [lo_q, hi_q], axis=1)
+    best = int(np.argmin((x_hi - x_lo) * (z_hi - z_lo)))
+
+    theta = angles[best]
+    right = np.cos(theta) * e1 + np.sin(theta) * e2
+    forward = np.cross(right, u)              # right x up = forward keeps det(R) = +1
+
+    y = pts @ u
+    y_lo, y_hi = np.percentile(y, [lo_q, hi_q])
+
+    extent = np.array([x_hi[best] - x_lo[best], y_hi - y_lo, z_hi[best] - z_lo[best]])
+    center = (
+        right * (x_lo[best] + x_hi[best]) / 2.0
+        + u * (y_lo + y_hi) / 2.0
+        + forward * (z_lo[best] + z_hi[best]) / 2.0
+    )
+    return OrientedBox(center, np.maximum(extent, 0.0), np.column_stack([right, u, forward]))
+
+
+def snap_to_floor(
+    obb: OrientedBox,
+    floor_height: float,
+    up: np.ndarray,
+    *,
+    threshold: float = 0.15,
+) -> OrientedBox:
+    """Pull a box's underside onto the floor when it is already nearly there.
+
+    Only the *visible* surface of a sofa is ever reconstructed, so its box floats
+    a few centimetres above the ground or sinks a few below it, depending on
+    which way the depth bled. Snapping fixes both without inventing anything: a
+    box already within `threshold` of the floor is meant to be resting on it. A
+    shelf on a wall is nowhere near, so it is left exactly as it was.
+    """
+    u = np.asarray(up, dtype=np.float64).reshape(3)
+    u = u / max(np.linalg.norm(u), 1e-12)
+
+    alignment = obb.R.T @ u
+    axis = int(np.argmax(np.abs(alignment)))
+    if abs(alignment[axis]) < 0.99:
+        # No box axis is vertical, so "the underside" is not a face of this box
+        # and there is nothing well-defined to snap.
+        return obb
+
+    half = float(obb.extent[axis]) / 2.0
+    height = float(obb.center @ u)
+    bottom, top = height - half, height + half
+
+    if abs(bottom - floor_height) > threshold:
+        return obb
+
+    extent = obb.extent.copy()
+    extent[axis] = max(top - floor_height, 0.0)
+    center = obb.center + ((top + floor_height) / 2.0 - height) * u
+    return OrientedBox(center, extent, obb.R.copy())
+
+
 def project_detection(
     mask: np.ndarray,
     pts3d: np.ndarray,
@@ -213,11 +358,18 @@ def project_detection(
     depth_eps: float = 0.15,
     min_points: int = 40,
     box_px: tuple[int, int, int, int] | None = None,
+    up: np.ndarray | None = None,
+    max_points: int = 2048,
+    obb_percentile: float = 1.0,
 ) -> Observation | None:
     """Lift one 2D detection to a 3D observation, or None if unsupported.
 
     Returning None is a feature: a detection over a low-confidence wall should
     disappear rather than contribute a fabricated 3D position.
+
+    `up` switches the box fit from PCA to gravity-aligned. Pass it whenever the
+    reconstruction has been levelled -- which it is by default -- because a PCA
+    box on a partial view describes the visible surface rather than the object.
     """
     if mask.shape != conf_mask.shape:
         raise ValueError(f"mask {mask.shape} does not match conf_mask {conf_mask.shape}")
@@ -244,16 +396,37 @@ def project_detection(
     if points.shape[0] < min_points:
         return None
 
+    n_kept = int(points.shape[0])
+    obb = (
+        fit_oriented_box(points)
+        if up is None
+        else fit_gravity_aligned_box(points, up, percentile=obb_percentile)
+    )
+
     return Observation(
         frame_idx=frame_idx,
         label=label,
         vlm_confidence=vlm_confidence,
         centroid=np.median(points, axis=0),
-        obb=fit_oriented_box(points),
-        n_points=int(points.shape[0]),
-        support=float(points.shape[0]) / float(n_requested),
+        obb=obb,
+        n_points=n_kept,
+        support=float(n_kept) / float(n_requested),
         box_px=box_px,
+        points=subsample(points, max_points),
     )
+
+
+def subsample(points: np.ndarray, limit: int, seed: int = 0) -> np.ndarray:
+    """At most `limit` points, chosen without replacement and deterministically.
+
+    Fusion pools points across every frame that saw an object, so an uncapped
+    detection covering half the image would dominate both memory and the fit.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if limit <= 0 or len(pts) <= limit:
+        return pts
+    idx = np.random.default_rng(seed).choice(len(pts), limit, replace=False)
+    return pts[np.sort(idx)]
 
 
 def camera_center_from_pose(pose_c2w: np.ndarray) -> np.ndarray:

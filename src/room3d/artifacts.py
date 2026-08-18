@@ -82,6 +82,42 @@ def load_frames_npz(path: str | Path) -> Reconstruction:
         )
 
 
+# The 3D points behind each observation, keyed "obs_<index>" into the
+# observations.json list. Kept out of the JSON because they are three orders of
+# magnitude larger than everything else in it and a human reads that file.
+OBSERVATION_POINTS_NAME = "observation_points.npz"
+
+
+def save_observation_points(obs_path: str | Path, observations) -> Path | None:
+    """Write each observation's 3D points beside `observations.json`.
+
+    Re-fusing in the viewer has to produce the same box the pipeline did, and a
+    box can only be fit to points -- so the points have to outlive the run.
+    Returns None when no observation carries any.
+    """
+    payload = {
+        f"obs_{i}": np.asarray(obs.points, dtype=np.float32)
+        for i, obs in enumerate(observations)
+        if getattr(obs, "points", None) is not None and len(obs.points)
+    }
+    if not payload:
+        return None
+
+    path = Path(obs_path).with_name(OBSERVATION_POINTS_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **payload)
+    return path
+
+
+def load_observation_points(obs_path: str | Path) -> dict[int, np.ndarray]:
+    """Read the sidecar back, keyed by observation index. Missing file -> empty."""
+    path = Path(obs_path).with_name(OBSERVATION_POINTS_NAME)
+    if not path.exists():
+        return {}
+    with np.load(path) as d:
+        return {int(k.split("_")[1]): np.asarray(d[k], dtype=np.float64) for k in d.files}
+
+
 def save_ply(path: str | Path, points: np.ndarray, colors: np.ndarray) -> None:
     """Write a binary little-endian PLY. colors are uint8 RGB."""
     path = Path(path)

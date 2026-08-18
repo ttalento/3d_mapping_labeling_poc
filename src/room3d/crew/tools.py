@@ -140,6 +140,7 @@ class ProjectDetectionsTool(BaseTool):
         cfg = s.config
         min_points = min_points or cfg.min_mask_points
         h, w = s.recon.image_hw
+        up, _ = s.gravity
 
         s.observations = []
         dropped_geometry = 0
@@ -173,6 +174,9 @@ class ProjectDetectionsTool(BaseTool):
                     depth_eps=cfg.depth_cluster_eps,
                     min_points=min_points,
                     box_px=box_px,
+                    up=up,
+                    max_points=cfg.max_points_per_observation,
+                    obb_percentile=cfg.obb_percentile,
                 )
                 if obs is None:
                     dropped_geometry += 1
@@ -226,6 +230,7 @@ class ClusterObservationsTool(BaseTool):
             call_llm = lambda prompt: self._llm.call(prompt)  # noqa: E731
 
         resolver = build_synonym_resolver(s.observed_labels, call_llm)
+        up, floor_height = s.gravity
 
         s.objects = cluster_observations(
             s.observations,
@@ -234,6 +239,11 @@ class ClusterObservationsTool(BaseTool):
             radius_floor=s.config.merge_radius_floor,
             radius_scale=s.config.merge_radius_scale,
             min_obb_iou=s.config.min_obb_iou,
+            up=up,
+            floor_height=floor_height if s.config.floor_snap_threshold > 0 else None,
+            floor_snap_threshold=s.config.floor_snap_threshold,
+            obb_percentile=s.config.obb_percentile,
+            max_pooled_points=s.config.max_pooled_points,
         )
 
         s.log(f"[cluster] {len(s.observations)} observations -> {len(s.objects)} objects")

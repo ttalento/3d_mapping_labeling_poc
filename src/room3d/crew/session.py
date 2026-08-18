@@ -30,9 +30,51 @@ class LabelingSession:
     objects: list[ObjectRecord] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
+    _gravity: tuple[np.ndarray | None, float | None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
     def log(self, message: str) -> None:
         self.notes.append(message)
         print(f"  {message}")
+
+    @property
+    def gravity(self) -> tuple[np.ndarray | None, float | None]:
+        """`(up, floor_height)` for this scene, or `(None, None)` if unknown.
+
+        Boxes are fit level with gravity, so the geometry stages need to know
+        which way that is. Reconstruction levels the scene by default, in which
+        case this re-derives +Y and a floor at 0 and costs one RANSAC; when it
+        was skipped, or the estimate is too weak to trust, the answer is None and
+        the pipeline falls back to PCA boxes rather than confidently levelling
+        every object the wrong way.
+        """
+        if self._gravity is None:
+            self._gravity = self._estimate_gravity()
+        return self._gravity
+
+    def _estimate_gravity(self) -> tuple[np.ndarray | None, float | None]:
+        from ..level import estimate_up
+
+        if not self.config.gravity_aligned_boxes:
+            return None, None
+
+        points = self.recon.pts3d[self.recon.conf_mask]
+        estimate = estimate_up(points, self.recon.poses)
+        if estimate.confidence < self.config.min_level_confidence:
+            self.log(
+                f"[level] up estimate too weak to trust "
+                f"({estimate.confidence:.2f} < {self.config.min_level_confidence:.2f}); "
+                "falling back to PCA boxes"
+            )
+            return None, None
+
+        self.log(
+            f"[level] boxes aligned to up={np.round(estimate.up, 3).tolist()} "
+            f"({estimate.source}, confidence {estimate.confidence:.2f}), "
+            f"floor at {estimate.floor_offset:.3f}"
+        )
+        return estimate.up, float(estimate.floor_offset)
 
     @property
     def observed_labels(self) -> list[str]:

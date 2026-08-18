@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..artifacts import Reconstruction
+from ..artifacts import Reconstruction, save_observation_points
 from ..config import LabelConfig
 from ..vlm import GeminiDetector, load_env, resolve_model
 from .session import LabelingSession
@@ -112,10 +112,13 @@ def run_labeling(
     # 2D box it came from.
     obs_path = out_path.parent / "observations.json"
     obs_path.write_text(json.dumps(build_observations_doc(session, room_name), indent=2))
+    points_path = save_observation_points(obs_path, session.observations)
 
     if verbose:
         print(f"\n[label] {len(session.objects)} objects -> {out_path}")
         print(f"[label] {len(session.observations)} observations -> {obs_path}")
+        if points_path is not None:
+            print(f"[label] observation point sets -> {points_path.name}")
 
     return result
 

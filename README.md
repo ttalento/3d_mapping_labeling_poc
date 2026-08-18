@@ -145,9 +145,16 @@ uv run room3d reconstruct out/office/frames        --room office
 uv run room3d label       out/office/frames.npz    --room office
 uv run room3d view        out/office
 
+# rebuild the 3D boxes from detections already on disk — no VLM calls
+uv run room3d refit       --room office
+
 # only for rooms reconstructed before levelling existed
 uv run room3d level       --room office
 ```
+
+`refit` exists because detection is the only expensive step. Everything after it
+is arithmetic over arrays already stored, so improving the geometry never has to
+mean paying for detection twice.
 
 Useful flags:
 
@@ -221,8 +228,9 @@ src/room3d/
 ├── frames.py        Stage 1  rotation, blur rejection, near-duplicate rejection
 ├── reconstruct.py   Stage 2  MASt3R + global alignment -> ply, traj, npz
 ├── level.py         gravity from poses + floor fit -> +Y up, floor at y=0
-├── projection.py    ★ 2D detection -> 3D  (pure, tested)
+├── projection.py    ★ 2D detection -> 3D, gravity-aligned boxes  (pure, tested)
 ├── fusion.py        ★ observations -> unique objects  (pure, tested)
+├── refit.py         redo projection + fusion from stored detections, no VLM
 ├── vlm.py           Gemini detection
 ├── crew/            CrewAI agents, tools, session, synonym resolution
 ├── webapp/          FastAPI viewer + vanilla-JS frontend
@@ -243,7 +251,9 @@ Two documented artifact interfaces connect the halves:
 - **`observations.json`** — every 2D detection with its box and its lifted 3D
   position, tagged with the object it clustered into. This is what makes the
   viewer able to draw an object back onto the frame it came from, and what makes
-  re-fusion free.
+  re-fusion free. Its sidecar **`observation_points.npz`** holds the 3D points
+  behind each observation, keyed `obs_<index>`; a box can only be fit to points,
+  so re-fusion needs them to reproduce what the pipeline produced.
 
 `projection.py` and `fusion.py` contain no LLM and no I/O. That is deliberate:
 it is the only way to tell a geometry bug from a VLM bug when output looks wrong.
@@ -341,6 +351,46 @@ confidence by how far that snap had to reach and tells you to run `room3d level`
 Before levelling, `living` scored **0.07** and the tab warned the plan might be a
 side view; after, it scores **0.82** and the plan shows the sofa from above.
 
+## How the 3D boxes are fit
+
+Levelling is what makes a good box possible, so this section follows that one.
+
+A detection's pixels index straight into the frame's world-frame pointmap, which
+gives a cloud per observation. The question is what box to wrap around it, and
+the obvious answer — PCA — is wrong here. **You only ever see one side of a
+sofa.** PCA on the front surface finds the axes of that slab, not of the sofa,
+and returns a box tilted at whatever angle the visible face happened to make.
+
+`fit_gravity_aligned_box` replaces the guess with a fact: furniture stands on a
+floor, so the vertical axis is gravity and only the **yaw** is unknown. It sweeps
+yaw at 1° and keeps the angle with the smallest ground footprint — rotating
+calipers with a fixed step, which is all the accuracy these clouds support.
+Extents come from the 1st/99th percentile rather than min/max, so the handful of
+pixels that leaked onto the wall behind the object cannot stretch the box across
+the room. Finally `snap_to_floor` pulls an underside already within 15 cm of
+`y = 0` onto it, which recovers the depth every reconstruction is missing under
+a sofa. A shelf on a wall is nowhere near the floor and is left alone.
+
+Fusion then fits **one** box to the pooled points of every observation in a
+cluster. That is the only honest way to build it: per-frame boxes express their
+extents along *different* axes, so combining two of them element-wise describes
+no box at all. This is why `Observation` carries its points (capped at 2048 per
+frame, 20 000 pooled) and why they are persisted to `observation_points.npz`.
+
+Two invariants are worth stating because violating either produces a box that
+looks plausible in isolation and is nonsense against the scene:
+
+- `points_inside_fraction(obb, points)` is the coherence check. A box built from
+  a centre, an extent and a rotation taken from different sources can contain
+  almost none of the geometry it claims to describe.
+- Extents, rotation and centre must come from **one** fit. Never mix.
+
+Clustering uses **nearest-member** linkage, not distance to the cluster mean. A
+sofa filmed by walking past it produces views that each overlap their neighbours
+and not the far end; once two merge, their mean sits between them and every later
+view is measured from a place no observation ever was, so the far half splits off
+as a second sofa.
+
 ## Phone video rotation
 
 Phones shoot portrait but store frames landscape with a `rotate` flag. OpenCV
@@ -359,5 +409,11 @@ metadata` when it fires. The bundled sample measures 90°.
 - Metric scale comes from the `_metric` checkpoint but global alignment
   optimises per-pair scale factors, so it can drift. Verify against a tape
   measure; use `--scale-ref` if it has.
-- Object extents are approximate. `fit_oriented_box` is PCA over the retained
-  points, which inflates slightly on partial views.
+- Object extents are approximate, and systematically *under*-estimated in depth:
+  only the visible surface is ever reconstructed, so a sofa's box reaches to its
+  front face and not to the wall behind it. Floor snapping recovers the vertical
+  direction; nothing yet recovers the unseen depth. Category size priors or
+  symmetry completion would, and neither is implemented.
+- Over-segmentation is the dominant remaining error, not box shape: on the
+  sample living room 42 of 50 objects are single sightings. That is a detection
+  and clustering problem, above the geometry described here.

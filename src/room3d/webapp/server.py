@@ -25,6 +25,7 @@ from .refuse import (
     radius_summary,
     refuse,
     save_objects,
+    scene_frame_of,
 )
 from .runs import RunManager
 
@@ -210,6 +211,7 @@ def create_app(out_dir: str | Path = "out", project_root: str | Path = ".") -> F
             raise HTTPException(404, "no observations.json — cannot re-fuse")
 
         obs_set = load_observations(room.observations)
+        up, floor_height = scene_frame_of(room.root)
         objects = refuse(
             obs_set,
             radius_floor=req.radius_floor,
@@ -217,6 +219,8 @@ def create_app(out_dir: str | Path = "out", project_root: str | Path = ".") -> F
             min_obb_iou=req.min_obb_iou,
             min_confidence=req.min_confidence,
             min_observations=req.min_observations,
+            up=up,
+            floor_height=floor_height,
         )
 
         previous = R.load_json(room.objects) or {}

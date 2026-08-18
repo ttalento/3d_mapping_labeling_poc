@@ -4,6 +4,7 @@
     room3d reconstruct out/office/frames --room office
     room3d level       --room office            # only for rooms built before levelling
     room3d label       out/office/frames.npz --room office [--direct]
+    room3d refit       --room office            # redo the 3D boxes, no VLM calls
     room3d view        out/office
     room3d run         data/rooms/office/video.mp4 --room office
 
@@ -104,6 +105,18 @@ def cmd_label(args) -> int:
         room_name=args.room,
         scale_verified=args.scale_verified,
     )
+    return 0
+
+
+def cmd_refit(args) -> int:
+    from .refit import refit_room
+
+    out = _out_dir(args.room)
+    try:
+        refit_room(out, config=load_config(args.config).label)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -222,6 +235,13 @@ def main(argv: list[str] | None = None) -> int:
     l.add_argument("--scale-verified", action="store_true",
                    help="record that the metric scale was checked against a real measurement")
     l.set_defaults(func=cmd_label)
+
+    f = sub.add_parser(
+        "refit",
+        help="rebuild 3D boxes from the detections already on disk (no VLM calls)",
+    )
+    f.add_argument("--room", required=True)
+    f.set_defaults(func=cmd_refit)
 
     v = sub.add_parser("view", help="show the cloud with labeled boxes")
     v.add_argument("dir")
