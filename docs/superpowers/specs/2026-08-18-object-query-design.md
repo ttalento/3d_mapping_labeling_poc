@@ -37,12 +37,18 @@ That single question answers both complaints:
 
 Measured on `out/LR_2` with cached boxes and no LLM calls:
 
-| object | views | extent before | extent after carving |
-|---|---|---|---|
-| cabinet | 2 | 0.40 × 0.49 × **1.26** | 0.29 × 0.47 × **0.91** |
-| window | 3 | 0.30 × 0.58 × **0.77** | 0.24 × 0.53 × **0.55** |
-| office chair | 3 | 0.87 × 0.39 × 0.38 | 0.45 × 0.20 × 0.91 → 0.73 × 0.19 × 0.28 (largest blob) |
-| sofa | 3 | 1.10 × 0.39 × 0.67 | 1.10 × 0.39 × 0.65 |
+| object | views | extent before | extent after carving | volume before → after |
+|---|---|---|---|---|
+| cabinet | 2 | 0.40 × 0.49 × 1.26 | 0.29 × 0.47 × 0.91 | 0.247 → 0.124 |
+| window | 3 | 0.30 × 0.58 × 0.77 | 0.24 × 0.53 × 0.55 | 0.134 → 0.070 |
+| office chair | 3 | 0.87 × 0.39 × 0.38 | 0.45 × 0.20 × 0.91 | 0.129 → 0.082 |
+| sofa | 3 | 1.10 × 0.39 × 0.67 | 1.10 × 0.39 × 0.65 | 0.287 → 0.279 |
+
+Compare **volumes, not components**: the fit re-derives yaw from whatever points
+survive, so a carved box's axes are not the uncarved box's axes and the three
+numbers do not correspond one to one. Adding largest-component selection takes
+the office chair further, to 0.73 × 0.19 × 0.28 (volume 0.039), and the chair
+from 0.099 to 0.063.
 
 ## Scope
 
@@ -103,12 +109,18 @@ vote(points, views, recon) -> (agree, testable)          # per-point counts
 consistent(points, views, recon, *, min_vote) -> bool mask
 consistency_mask(frame, views, recon) -> (H, W) bool     # the viewer overlay
 largest_component(points, *, voxel) -> bool mask         # scipy.ndimage.label
-agreement_between(views_a, views_b, recon) -> float      # the identity test
+agreement_between(views_a, views_b, recon) -> float      # the identity test, 0..1
 carve(views, recon, *, min_vote, keep_largest) -> points
 ```
 
 `min_vote` is a **fraction of frames that could see the point**, not a veto.
 Unanimity is wrong: it destroys small objects seen by few cameras.
+
+`agreement_between` is **symmetric by construction**: take the fraction of A's
+points that land inside B's boxes where B could see them, the same for B into A,
+and return the smaller of the two. The minimum, not the mean — a small object
+sitting inside a large one scores high in one direction and must not be merged on
+that evidence alone.
 
 `consistency_mask` is the same computation transposed — score pixels rather than
 pooled points. That is where the per-frame mask comes from, at no extra cost.
@@ -144,16 +156,24 @@ lives in `consensus.py`; the greedy grouping policy lives here.
 class QueryMatch:
     label: str
     obb: OrientedBox
-    score: float                      # views × vote strength × VLM confidence
+    score: float                      # ranking key, see below
     views: list[View]
     n_points: int
     vote_stats: dict                  # so min_vote is visible, not magic
     absorbed_object_ids: list[str]
 ```
 
+`score` ranks matches within one query; it is not comparable across queries and
+must not be presented as a probability. It is the geometric mean of three terms
+already used by `_cluster_confidence` in `fusion.py` — how many views support the
+match, the mean vote fraction of its surviving points, and the mean VLM
+confidence of its detections — so that a match failing any one of them cannot be
+rescued by the other two.
+
 **Commit** builds an `ObjectRecord` from a match, deletes every object named in
 `absorbed_object_ids`, and writes with a `.prev.json` backup, reusing the pattern
-in `refit.py`.
+in `refit.py`. `--commit N` is **1-indexed**, matching the numbering the CLI
+prints.
 
 ### `QueryConfig` in `config.py`
 
@@ -210,6 +230,16 @@ TDD throughout, following the existing `tests/` conventions.
   absorbs duplicates and writes the backup.
 - Integration on the synthetic levelled room in `test_boxfit_wiring.py`, plus a
   real-data check against `out/LR_2`'s cabinet.
+
+## Implementation order
+
+Two plans, not one. The split is where the language changes:
+
+1. **Geometry and query engine** — `camera.py`, `consensus.py`, `query.py`,
+   `QueryConfig`, the CLI verb. Fully testable headless, and it is what makes the
+   idea either work or not.
+2. **Viewer integration** — the HTTP endpoint, the search box, the mask overlay.
+   Worth doing only once (1) has proved out on real rooms.
 
 ## Known limits, stated up front
 
