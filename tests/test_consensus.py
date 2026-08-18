@@ -193,3 +193,124 @@ def test_view_carries_the_detection_provenance_it_came_from():
              observation_id=7, object_id="obj_002")
     assert (v.frame_idx, v.box_px, v.label) == (3, (1, 2, 3, 4), "couch")
     assert (v.vlm_confidence, v.observation_id, v.object_id) == (0.8, 7, "obj_002")
+
+
+# --- harvesting and carving ----------------------------------------------------
+
+from room3d.consensus import candidate_points, carve, largest_component
+
+
+def test_candidate_points_gathers_the_pixels_inside_every_box():
+    recon = make_recon([camera_at(0.0), camera_at(1.0)])
+    views = [View(0, (10, 10, 20, 20)), View(1, (5, 5, 10, 10))]
+
+    points, source = candidate_points(views, recon)
+    assert len(points) == 10 * 10 + 5 * 5
+    assert (source[: 10 * 10] == 0).all()
+    assert (source[10 * 10 :] == 1).all()
+
+
+def test_candidate_points_skips_low_confidence_pixels():
+    recon = make_recon([camera_at(0.0)])
+    recon.conf_mask[0, 10:15, 10:20] = False
+    points, _ = candidate_points([View(0, (10, 10, 20, 20))], recon)
+    assert len(points) == 10 * 10 - 5 * 10
+
+
+def test_candidate_points_with_no_views_is_empty_but_well_shaped():
+    recon = make_recon([camera_at(0.0)])
+    points, source = candidate_points([], recon)
+    assert points.shape == (0, 3)
+    assert source.shape == (0,)
+
+
+def test_carving_removes_the_distractor_and_keeps_the_object():
+    """Baseline 0.5, not the 1.5 used elsewhere in this file: `candidate_points`
+    harvests real reconstruction pixels, which here sit on `make_recon`'s far
+    backdrop (depth 100) rather than at the target's own depth (4). A box's
+    *position* tracks the target's parallax (~10px per unit baseline at depth 4),
+    but the backdrop pixels *inside* it barely move between frames (~0.4px per
+    unit baseline at depth 100). Two frames' boxes can only ever share backdrop
+    content when their position shift is under roughly 12 / 10.4 px, i.e. a
+    baseline difference below ~1.15 -- at 1.5 (adjacent) or 3.0 (end to end) that
+    is never satisfied, so `agree` is 0 for every candidate and carving can never
+    keep anything. 0.5 is the same value Task 2 settled on for an analogous
+    defect, and is confirmed here to keep 0 < kept < raw."""
+    recon = make_recon([camera_at(-0.5), camera_at(0.0), camera_at(0.5)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    raw, _ = candidate_points(views, recon)
+    result = carve(views, recon, keep_largest=False)
+    assert 0 < len(result.points) < len(raw)
+
+
+def test_carving_reports_where_each_surviving_point_came_from():
+    """Callers need this to quote an honest vote fraction, which requires
+    leave-one-out, which requires knowing each point's source frame.
+
+    Baseline 0.5 -- see the note in
+    test_carving_removes_the_distractor_and_keeps_the_object."""
+    recon = make_recon([camera_at(-0.5), camera_at(0.0), camera_at(0.5)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    result = carve(views, recon, keep_largest=False)
+    assert result.source.shape == (len(result.points),)
+    assert set(np.unique(result.source)) <= {0, 1, 2}
+
+
+def test_carving_reports_how_much_it_removed():
+    """Baseline 0.5 -- see the note in
+    test_carving_removes_the_distractor_and_keeps_the_object."""
+    recon = make_recon([camera_at(-0.5), camera_at(0.0), camera_at(0.5)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    stats = carve(views, recon, keep_largest=False).stats
+    assert stats["n_kept"] < stats["n_candidates"]
+    assert 0.0 <= stats["kept_frac"] <= 1.0
+    assert 0.0 <= stats["mean_vote"] <= 1.0
+    assert stats["min_vote"] == 0.6
+
+
+def test_carving_a_single_view_returns_its_candidates_unchanged():
+    """Leave-one-out leaves nothing to check against. Returning an empty result
+    would read as 'not there' when the truth is 'not verifiable'."""
+    recon = make_recon([camera_at(0.0)])
+    views = [View(0, (10, 10, 20, 20))]
+
+    raw, _ = candidate_points(views, recon)
+    result = carve(views, recon)
+    assert len(result.points) == len(raw)
+    assert result.stats["mean_vote"] == 0.0        # nothing verified it
+
+
+def test_largest_component_keeps_the_bigger_of_two_separated_blobs():
+    rng = np.random.default_rng(0)
+    big = rng.normal(0, 0.05, (500, 3))
+    small = rng.normal(0, 0.05, (50, 3)) + np.array([3.0, 0.0, 0.0])
+    points = np.vstack([big, small])
+
+    keep = largest_component(points, voxel=0.05)
+    assert keep[:500].all()
+    assert not keep[500:].any()
+
+
+def test_largest_component_keeps_everything_when_it_is_one_blob():
+    rng = np.random.default_rng(0)
+    points = rng.normal(0, 0.05, (300, 3))
+    assert largest_component(points, voxel=0.05).all()
+
+
+def test_largest_component_coarsens_rather_than_allocating_a_vast_grid():
+    """A single far outlier must not turn a 4 cm grid into gigabytes."""
+    rng = np.random.default_rng(0)
+    points = np.vstack([rng.normal(0, 0.05, (200, 3)), [[500.0, 500.0, 500.0]]])
+    keep = largest_component(points, voxel=0.001, max_cells=100_000)
+    assert keep.shape == (201,)
+
+
+def test_largest_component_handles_too_few_points_to_cluster():
+    assert largest_component(np.zeros((1, 3))).all()
+    assert largest_component(np.zeros((0, 3))).shape == (0,)
