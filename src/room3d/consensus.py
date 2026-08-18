@@ -309,6 +309,54 @@ def agreement_between(
     )
 
 
+def consistency_mask(
+    frame: int,
+    views: Sequence[View],
+    recon,
+    *,
+    min_vote: float = 0.6,
+    occlusion_tol: float = 0.10,
+) -> np.ndarray:
+    """Which pixels of `frame`'s box the other views agree are the object.
+
+    The same computation as `carve`, transposed: score pixels instead of pooled
+    points. That makes it a segmentation mask derived from geometry alone -- no
+    model, no extra call -- and it is the only way to *see* whether a box that
+    also contains a sofa is being counted as cabinet or as sofa.
+
+    Returns a full-image mask so it can be composited directly onto the frame.
+    """
+    height, width = recon.image_hw
+    region = np.zeros((height, width), dtype=bool)
+    for view in views:
+        if view.frame_idx == frame:
+            x0, y0, x1, y1 = view.box_px
+            region[y0:y1, x0:x1] = True
+
+    out = np.zeros((height, width), dtype=bool)
+    region &= recon.conf_mask[frame]
+    if not region.any():
+        return out
+
+    where = np.argwhere(region)                     # (M, 2), rows of (y, x)
+    points = np.asarray(recon.pts3d[frame], dtype=np.float64)[region]
+
+    finite = np.isfinite(points).all(axis=1)
+    where, points = where[finite], points[finite]
+    if len(points) == 0:
+        return out
+
+    # These pixels came from `frame`, so `frame` abstains -- otherwise every
+    # pixel would agree with itself and the mask would just redraw the box.
+    source = np.full(len(points), frame, dtype=np.int64)
+    keep = consistent(
+        points, views, recon,
+        min_vote=min_vote, occlusion_tol=occlusion_tol, source=source,
+    )
+    out[where[keep, 0], where[keep, 1]] = True
+    return out
+
+
 def _mean_vote(points, source, views, recon, occlusion_tol: float) -> float:
     """Average agreement across the points that survived, leave-one-out."""
     if len(points) == 0:

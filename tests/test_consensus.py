@@ -401,3 +401,65 @@ def test_two_boxes_in_the_same_frame_never_merge():
 def test_agreement_with_an_empty_side_is_zero():
     recon = make_recon([camera_at(0.0)])
     assert agreement_between([], [View(0, (5, 5, 15, 15))], recon) == 0.0
+
+
+# --- the free mask -------------------------------------------------------------
+
+from room3d.consensus import consistency_mask
+
+# Baseline 1.0, not the 1.5 in the brief. `consistency_mask` harvests real
+# reconstruction pixels from frame 1's *own* box -- backdrop points at depth
+# 100 -- then asks frames 0 and 2, whose boxes are centred on the target's own
+# depth (4), whether each one lands inside. A column at offset `delta` from
+# frame 1's own box centre (delta in [-half, half]) reprojects into a flanking
+# box at offset `9.6 * baseline + delta` from that box's centre (backdrop
+# parallax 0.4 px/unit baseline vs. the box's own 10 px/unit baseline; see the
+# analogous derivation on `test_carving_removes_the_distractor_and_keeps_the_object`
+# for the same 9.6 constant). Both flanking boxes can agree on the same column
+# only where the two offset windows overlap, which needs baseline <= half/9.6.
+# For half=12 that is 1.25; at 1.5 no column is ever doubly confirmed and the
+# mask would always be empty regardless of implementation. 1.0 leaves a margin
+# under 1.25 and confirms (against the real `vote`/`consistent` pair) that it
+# yields a non-empty, non-full column band -- so the mask is a genuine strict
+# subset, not merely trivially so.
+_MASK_BASELINE = 1.0
+
+
+def test_the_mask_is_a_subset_of_the_box_it_explains():
+    recon = make_recon([camera_at(-_MASK_BASELINE), camera_at(0.0), camera_at(_MASK_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    mask = consistency_mask(1, views, recon)
+    assert mask.shape == recon.image_hw
+
+    x0, y0, x1, y1 = views[1].box_px
+    outside = mask.copy()
+    outside[y0:y1, x0:x1] = False
+    assert not outside.any()
+
+
+def test_the_mask_marks_fewer_pixels_than_the_box_contains():
+    """If it marked all of them it would be telling you nothing."""
+    recon = make_recon([camera_at(-_MASK_BASELINE), camera_at(0.0), camera_at(_MASK_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i, half=12)) for i in range(3)]
+
+    x0, y0, x1, y1 = views[1].box_px
+    assert consistency_mask(1, views, recon).sum() < (x1 - x0) * (y1 - y0)
+
+
+def test_a_frame_with_no_box_gets_an_empty_mask():
+    recon = make_recon([camera_at(0.0), camera_at(1.0)])
+    mask = consistency_mask(1, [View(0, (5, 5, 15, 15))], recon)
+    assert not mask.any()
+
+
+def test_raising_min_vote_can_only_shrink_the_mask():
+    recon = make_recon([camera_at(-_MASK_BASELINE), camera_at(0.0), camera_at(_MASK_BASELINE)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i, half=12)) for i in range(3)]
+
+    loose = consistency_mask(1, views, recon, min_vote=0.0).sum()
+    tight = consistency_mask(1, views, recon, min_vote=1.0).sum()
+    assert tight <= loose
