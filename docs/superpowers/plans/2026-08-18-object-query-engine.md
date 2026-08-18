@@ -3038,3 +3038,318 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - `room3d query --room LR_2 "couch"` returns a match with vote statistics and a levelled box.
 - `room3d query --room LR_2 "couch" --commit 1` replaces the duplicate couch entries with one and writes `objects.prev.json`.
 - No new entries in `pyproject.toml`.
+
+---
+
+### Task 12: The certainty gate
+
+Added mid-execution at the user's request: *"I wouldn't mind losing some object labels if there is no certainty of its position."* Precision over recall.
+
+The engine already computes what certainty means — how many views support a match, and how strongly the surviving points are agreed on. What it does not yet do is act on it: `query_room` returns everything it found and leaves the judgement to the reader.
+
+**Files:**
+- Modify: `src/room3d/config.py` (`QueryConfig`, `LabelConfig`)
+- Modify: `src/room3d/query.py`
+- Modify: `src/room3d/refit.py`
+- Modify: `src/room3d/cli.py`
+- Modify: `README.md`
+- Test: `tests/test_certainty.py`
+
+**Interfaces:**
+- Consumes: `QueryMatch` and `commit_match` (Tasks 8, 10), `refit_room` (existing module).
+- Produces:
+  - `QueryConfig.min_views: int = 2`, `QueryConfig.min_mean_vote: float = 0.5`
+  - `LabelConfig.min_observations: int = 1`
+  - `query.filter_by_certainty(matches, *, min_views, min_mean_vote) -> tuple[list[QueryMatch], list[QueryMatch]]` returning `(kept, dropped)`
+  - `commit_match(room_dir, match, *, force=False, verbose=True)` — refuses a match below the gate unless forced
+
+**The governing principle: nothing vanishes silently.** Every path that drops something reports how many and why. The user asked to lose uncertain labels — not to lose the knowledge that they existed. A filter that quietly halves the object list is indistinguishable from a bug.
+
+**Two different defaults, deliberately.** A query is a pointed question whose answer should be trustworthy, so `min_views=2` is the default there: one view can be cross-checked against nothing, which is exactly the "no certainty of position" case. Bulk `refit` keeps `min_observations=1` and stays lossless, with the switch one flag away — dropping 42 of `LR_2`'s 50 objects should be something the user asks for, not something a config default does to them.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_certainty.py`:
+
+```python
+"""Gate 9: losing labels we cannot place, on purpose.
+
+An object whose position is uncertain is worse than a missing one, because a
+confident wrong box gets acted on and an absent one does not. What certainty
+means here is already computed -- how many views support the match, and how
+strongly the surviving points are agreed on -- so this is a filter over
+existing evidence, not new machinery.
+
+The governing rule is that nothing vanishes silently: every drop is counted
+and returned to the caller.
+"""
+
+import json
+
+import numpy as np
+import pytest
+
+from room3d.config import LabelConfig, QueryConfig
+from room3d.consensus import View
+from room3d.projection import OrientedBox
+from room3d.query import QueryMatch, commit_match, filter_by_certainty
+from room3d.refit import refit_room
+
+
+def a_match(n_views=3, mean_vote=0.9, supported=True):
+    obb = OrientedBox(np.zeros(3), np.ones(3), np.eye(3))
+    return QueryMatch(
+        label="couch",
+        obb=obb if supported else None,
+        score=0.8,
+        views=[View(i, (0, 0, 10, 10)) for i in range(n_views)],
+        n_points=500,
+        vote_stats={"mean_vote": mean_vote, "min_vote": 0.6,
+                    "n_candidates": 1000, "n_kept": 500, "kept_frac": 0.5},
+        supported=supported,
+    )
+
+
+def test_a_single_view_match_is_dropped():
+    """One view can be cross-checked against nothing. That IS the uncertain case."""
+    kept, dropped = filter_by_certainty([a_match(n_views=1)],
+                                        min_views=2, min_mean_vote=0.5)
+    assert kept == []
+    assert len(dropped) == 1
+
+
+def test_a_well_supported_match_survives():
+    kept, dropped = filter_by_certainty([a_match()], min_views=2, min_mean_vote=0.5)
+    assert len(kept) == 1
+    assert dropped == []
+
+
+def test_a_weakly_agreed_match_is_dropped():
+    kept, _ = filter_by_certainty([a_match(mean_vote=0.2)],
+                                  min_views=2, min_mean_vote=0.5)
+    assert kept == []
+
+
+def test_an_unsupported_match_is_dropped_however_open_the_gate():
+    """No 3D points survived carving, so there is no position to be certain of."""
+    kept, _ = filter_by_certainty([a_match(supported=False)],
+                                  min_views=0, min_mean_vote=0.0)
+    assert kept == []
+
+
+def test_dropped_matches_are_returned_not_discarded():
+    _, dropped = filter_by_certainty([a_match(n_views=1)],
+                                     min_views=2, min_mean_vote=0.5)
+    assert dropped[0].label == "couch"
+    assert len(dropped[0].views) == 1
+
+
+def test_the_gate_can_be_opened_completely():
+    kept, dropped = filter_by_certainty([a_match(n_views=1, mean_vote=0.0)],
+                                        min_views=0, min_mean_vote=0.0)
+    assert len(kept) == 1 and dropped == []
+
+
+def test_ranking_is_preserved_among_survivors():
+    kept, _ = filter_by_certainty([a_match(n_views=5), a_match(n_views=3)],
+                                  min_views=2, min_mean_vote=0.5)
+    assert [len(m.views) for m in kept] == [5, 3]
+
+
+# --- the defaults encode the preference ---------------------------------------
+
+
+def test_query_defaults_require_cross_view_support():
+    assert QueryConfig().min_views == 2
+    assert QueryConfig().min_mean_vote == 0.5
+
+
+def test_refit_defaults_stay_lossless():
+    """Dropping most of a room is something the user asks for, not a default."""
+    assert LabelConfig().min_observations == 1
+
+
+# --- committing --------------------------------------------------------------
+
+
+def test_committing_an_uncertain_match_is_refused(tmp_path):
+    (tmp_path / "objects.json").write_text(json.dumps({"room": "r", "objects": []}))
+    with pytest.raises(ValueError, match="certainty gate"):
+        commit_match(tmp_path, a_match(n_views=1), verbose=False)
+
+
+def test_force_overrides_the_certainty_gate(tmp_path):
+    (tmp_path / "objects.json").write_text(json.dumps({"room": "r", "objects": []}))
+    assert commit_match(tmp_path, a_match(n_views=1), force=True,
+                        verbose=False)["object_id"]
+
+
+# --- the same trade, applied to a whole room ---------------------------------
+
+
+def test_refit_can_drop_thinly_supported_objects(tmp_path):
+    """The user's actual case: most objects in the sample room are single
+    sightings."""
+    from test_refit import legacy_room
+
+    room = legacy_room(tmp_path)
+    lossless = refit_room(room, verbose=False)
+
+    strict = refit_room(
+        room, config=LabelConfig(min_mask_points=10, min_observations=99),
+        verbose=False,
+    )
+    assert strict["n_objects"] == 0
+    assert strict["n_dropped_uncertain"] == lossless["n_objects"]
+
+
+def test_refit_reports_nothing_dropped_by_default(tmp_path):
+    from test_refit import legacy_room
+
+    assert refit_room(legacy_room(tmp_path), verbose=False)["n_dropped_uncertain"] == 0
+```
+
+- [ ] **Step 2: Run the tests and verify they fail**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_certainty.py -q`
+Expected: `ImportError: cannot import name 'filter_by_certainty' from 'room3d.query'`.
+
+- [ ] **Step 3: Add the config fields**
+
+In `src/room3d/config.py`, append to `QueryConfig`:
+
+```python
+    # --- the certainty gate ---
+    # A match nothing could cross-check is not a located object; it is a guess
+    # with coordinates attached. Dropping it beats reporting it, because a
+    # confident wrong box gets acted on and a missing one does not.
+    min_views: int = 2
+    min_mean_vote: float = 0.5
+```
+
+Append to `LabelConfig`:
+
+```python
+    # Bulk relabelling stays lossless by default. Raise it to trade recall for
+    # certainty -- on the sample living room, 2 drops every single-sighting
+    # object, which is most of them.
+    min_observations: int = 1
+```
+
+- [ ] **Step 4: Implement the filter in `src/room3d/query.py`**
+
+```python
+def filter_by_certainty(
+    matches: Sequence[QueryMatch],
+    *,
+    min_views: int,
+    min_mean_vote: float,
+) -> tuple[list[QueryMatch], list[QueryMatch]]:
+    """Split matches into those we can place and those we cannot: `(kept, dropped)`.
+
+    Both halves are returned because nothing may vanish silently. A filter that
+    quietly halves the object list is indistinguishable from a bug, and the
+    request was to lose uncertain labels -- not to lose the knowledge that they
+    were found.
+
+    A single-view match fails this gate by construction: cross-view agreement is
+    the only evidence here that a box is where it claims to be, and one view has
+    nothing to be checked against.
+    """
+    kept: list[QueryMatch] = []
+    dropped: list[QueryMatch] = []
+    for m in matches:
+        certain = (
+            m.supported
+            and len(m.views) >= min_views
+            and float(m.vote_stats.get("mean_vote", 0.0)) >= min_mean_vote
+        )
+        (kept if certain else dropped).append(m)
+    return kept, dropped
+```
+
+- [ ] **Step 5: Gate `commit_match`**
+
+Change the signature to `def commit_match(room_dir, match, *, force: bool = False, verbose: bool = True) -> dict:` and add this immediately after the existing `supported` check:
+
+```python
+    if not force:
+        config = QueryConfig()
+        if not filter_by_certainty(
+            [match], min_views=config.min_views, min_mean_vote=config.min_mean_vote
+        )[0]:
+            raise ValueError(
+                f"this match is below the certainty gate ({len(match.views)} view(s), "
+                f"mean vote {match.vote_stats.get('mean_vote', 0.0):.2f}) -- writing it "
+                f"into objects.json would record a position nothing verified. "
+                f"Pass force=True to commit it anyway."
+            )
+```
+
+- [ ] **Step 6: Apply the gate in `cmd_query`**
+
+After the result returns and before printing or committing:
+
+```python
+    kept, dropped = result.matches, []
+    if not args.all:
+        kept, dropped = filter_by_certainty(
+            result.matches, min_views=cfg.min_views, min_mean_vote=cfg.min_mean_vote
+        )
+    if dropped and not args.json:
+        print(f"[query] {len(dropped)} match(es) hidden as too uncertain to place "
+              f"(need {cfg.min_views}+ views agreeing at {cfg.min_mean_vote:.2f}); "
+              f"--all shows them")
+```
+
+`--commit N` must index into `kept`, not `result.matches`, and pass `force=args.force_commit`. Update the bounds message to report `len(kept)`.
+
+Add the flags to the `query` subparser:
+
+```python
+    q.add_argument("--all", action="store_true",
+                   help="include matches too uncertain to place")
+    q.add_argument("--force-commit", action="store_true",
+                   help="commit even if the match is below the certainty gate")
+```
+
+- [ ] **Step 7: Apply `min_observations` in `src/room3d/refit.py`**
+
+In `refit_room`, immediately after `cluster_observations` returns:
+
+```python
+    dropped = [o for o in objects if o.n_observations < config.min_observations]
+    objects = [o for o in objects if o.n_observations >= config.min_observations]
+```
+
+Add `"n_dropped_uncertain": len(dropped)` to the returned summary, name it in the verbose line, and add `--min-observations` to the `refit` subparser wired into `config.min_observations`.
+
+- [ ] **Step 8: Run the tests, then the full suite**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_certainty.py -q`
+Then: `.venv/Scripts/python.exe -m pytest -q`
+Expected: PASS (every test in the file), then the whole suite green.
+
+- [ ] **Step 9: Document it in `README.md`**
+
+Append to the "Querying one object" section:
+
+```markdown
+By default a query reports only objects it can actually place: at least two views
+that agree. One view can be cross-checked against nothing, so its box is a guess
+with coordinates attached — and a confident wrong box gets acted on, while a
+missing one does not. `--all` shows what was hidden, and the count is always
+printed, because a filter that silently halves the object list is
+indistinguishable from a bug.
+
+`room3d refit --min-observations 2` applies the same trade to a whole room.
+```
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/room3d/config.py src/room3d/query.py src/room3d/refit.py src/room3d/cli.py tests/test_certainty.py README.md
+git commit -m "Drop matches whose position nothing verified"
+```
+
+(Full message body should explain the trade; end with the required `Co-Authored-By` trailer.)
