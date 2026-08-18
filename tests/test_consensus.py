@@ -371,14 +371,22 @@ def test_agreement_is_symmetric():
 
 def test_a_small_object_inside_a_large_one_is_not_merged_with_it():
     """Every speaker point is inside the cabinet's box, so the speaker->cabinet
-    direction scores high. The reverse does not, and the minimum is what stops
-    the two becoming one object."""
+    direction scores high (measured 1.0). The reverse does not (measured
+    ~0.020) -- most of the cabinet's points are nowhere near the speaker's
+    small box -- and it is the **minimum** of the two that stops a speaker
+    being absorbed into the cabinet it happens to sit inside.
+
+    The threshold is 0.3, not the 0.6 in the brief: at 0.6, `min` (~0.02) and
+    `mean` (~0.51) of the two directional scores both pass, so a regression
+    from min to mean would go undetected. 0.3 sits with real margin below the
+    min score and real margin above the mean score, so it fails the moment
+    the minimum is replaced by anything that averages the two directions."""
     recon = make_recon([camera_at(-_IDENTITY_BASELINE), camera_at(_IDENTITY_BASELINE)])
     target = np.array([0.0, 0.0, 4.0])
 
     large = [View(0, box_around(target, recon, 0, half=14))]
     small = [View(1, box_around(target, recon, 1, half=2))]
-    assert agreement_between(small, large, recon) < 0.6
+    assert agreement_between(small, large, recon) < 0.3
 
 
 def test_two_boxes_in_the_same_frame_never_merge():
