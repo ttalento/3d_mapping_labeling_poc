@@ -114,8 +114,11 @@ def cmd_refit(args) -> int:
     from .refit import refit_room
 
     out = _out_dir(args.room)
+    cfg = load_config(args.config).label
+    if args.min_observations is not None:
+        cfg.min_observations = args.min_observations
     try:
-        refit_room(out, config=load_config(args.config).label)
+        refit_room(out, config=cfg)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -123,7 +126,7 @@ def cmd_refit(args) -> int:
 
 
 def cmd_query(args) -> int:
-    from .query import commit_match, query_room
+    from .query import commit_match, filter_by_certainty, query_room
 
     out = _out_dir(args.room)
     cfg = load_config(args.config).query
@@ -146,6 +149,16 @@ def cmd_query(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    kept, dropped = result.matches, []
+    if not args.all:
+        kept, dropped = filter_by_certainty(
+            result.matches, min_views=cfg.min_views, min_mean_vote=cfg.min_mean_vote
+        )
+    if dropped and not args.json:
+        print(f"[query] {len(dropped)} match(es) hidden as too uncertain to place "
+              f"(need {cfg.min_views}+ views agreeing at {cfg.min_mean_vote:.2f}); "
+              f"--all shows them")
+
     if args.json:
         print(json.dumps(result.as_dict(), indent=2))
     elif not result.matches:
@@ -153,12 +166,15 @@ def cmd_query(args) -> int:
             print(f"[query] {note}")
 
     if args.commit is not None:
-        if args.commit < 1 or args.commit > len(result.matches):
+        if args.commit < 1 or args.commit > len(kept):
             print(f"error: --commit is 1-indexed; this query returned "
-                  f"{len(result.matches)} match(es)", file=sys.stderr)
+                  f"{len(kept)} match(es)", file=sys.stderr)
             return 1
         try:
-            commit_match(out, result.matches[args.commit - 1], verbose=not args.json)
+            commit_match(
+                out, kept[args.commit - 1],
+                force=args.force_commit, verbose=not args.json,
+            )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -301,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
         help="rebuild 3D boxes from the detections already on disk (no VLM calls)",
     )
     f.add_argument("--room", required=True)
+    f.add_argument("--min-observations", type=int, default=None,
+                   help="drop objects seen fewer times than this (default 1, lossless)")
     f.set_defaults(func=cmd_refit)
 
     q = sub.add_parser("query", help="name an object, get its 3D box (no reconstruction)")
@@ -314,6 +332,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="promote match N (1-indexed) into objects.json")
     q.add_argument("--min-vote", type=float, default=None,
                    help="fraction of views that must agree (default 0.6)")
+    q.add_argument("--all", action="store_true",
+                   help="include matches too uncertain to place")
+    q.add_argument("--force-commit", action="store_true",
+                   help="commit even if the match is below the certainty gate")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_query)
 

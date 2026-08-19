@@ -94,6 +94,13 @@ def refit_room(
         max_pooled_points=config.max_pooled_points,
     )
 
+    # An object seen only once has no cross-observation agreement behind it --
+    # the same "no certainty of position" case `query.filter_by_certainty`
+    # gates on. The default leaves it in: most of a real room is single
+    # sightings, and dropping most of it must be something the user asks for.
+    dropped = [o for o in objects if o.n_observations < config.min_observations]
+    objects = [o for o in objects if o.n_observations >= config.min_observations]
+
     previous = json.loads((room_dir / "objects.json").read_text()) if (
         room_dir / "objects.json"
     ).exists() else {}
@@ -106,12 +113,14 @@ def refit_room(
         "n_observations": len(observations),
         "n_skipped": skipped,
         "n_objects": len(objects),
+        "n_dropped_uncertain": len(dropped),
         "previous_n_objects": len(previous.get("objects", [])),
         "levelled": up is not None,
     }
     if verbose:
         print(f"[refit] {len(observations)} observations ({skipped} skipped) "
               f"-> {len(objects)} objects "
+              f"({len(dropped)} dropped as too thinly observed) "
               f"(was {summary['previous_n_objects']})")
     return summary
 

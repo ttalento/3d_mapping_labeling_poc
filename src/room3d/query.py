@@ -385,7 +385,38 @@ def _vlm_views(recon, doc, phrase, detector, notes: list[str]) -> list[View]:
     return views
 
 
-def commit_match(room_dir: str | Path, match: QueryMatch, *, verbose: bool = True) -> dict:
+def filter_by_certainty(
+    matches: Sequence[QueryMatch],
+    *,
+    min_views: int,
+    min_mean_vote: float,
+) -> tuple[list[QueryMatch], list[QueryMatch]]:
+    """Split matches into those we can place and those we cannot: `(kept, dropped)`.
+
+    Both halves are returned because nothing may vanish silently. A filter that
+    quietly halves the object list is indistinguishable from a bug, and the
+    request was to lose uncertain labels -- not to lose the knowledge that they
+    were found.
+
+    A single-view match fails this gate by construction: cross-view agreement is
+    the only evidence here that a box is where it claims to be, and one view has
+    nothing to be checked against.
+    """
+    kept: list[QueryMatch] = []
+    dropped: list[QueryMatch] = []
+    for m in matches:
+        certain = (
+            m.supported
+            and len(m.views) >= min_views
+            and float(m.vote_stats.get("mean_vote", 0.0)) >= min_mean_vote
+        )
+        (kept if certain else dropped).append(m)
+    return kept, dropped
+
+
+def commit_match(
+    room_dir: str | Path, match: QueryMatch, *, force: bool = False, verbose: bool = True
+) -> dict:
     """Write a match into `objects.json`, replacing what it subsumes.
 
     This is the step that fixes duplicates. A query that finds one couch where
@@ -394,6 +425,11 @@ def commit_match(room_dir: str | Path, match: QueryMatch, *, verbose: bool = Tru
 
     Destructive, so it backs up first: a vague phrase must never cost a labelled
     room. Same `.prev.json` convention as `refit.py`.
+
+    Refuses a match below the certainty gate (`QueryConfig`'s defaults) unless
+    `force=True`: committing writes a position into `objects.json` that later
+    code will treat as fact, and an uncertain box acted on is worse than one
+    never written.
     """
     from .fusion import ObjectRecord
 
@@ -402,6 +438,18 @@ def commit_match(room_dir: str | Path, match: QueryMatch, *, verbose: bool = Tru
             "this match is unsupported -- it was found in 2D but no 3D points "
             "survived carving, so there is no box to commit"
         )
+
+    if not force:
+        config = QueryConfig()
+        if not filter_by_certainty(
+            [match], min_views=config.min_views, min_mean_vote=config.min_mean_vote
+        )[0]:
+            raise ValueError(
+                f"this match is below the certainty gate ({len(match.views)} view(s), "
+                f"mean vote {match.vote_stats.get('mean_vote', 0.0):.2f}) -- writing it "
+                f"into objects.json would record a position nothing verified. "
+                f"Pass force=True to commit it anyway."
+            )
 
     room_dir = Path(room_dir)
     path = room_dir / "objects.json"

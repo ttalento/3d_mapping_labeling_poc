@@ -60,6 +60,11 @@ class LabelConfig:
     # share one budget or the run dies partway through with a 429.
     max_rpm: int = 10
 
+    # Bulk relabelling stays lossless by default. Raise it to trade recall for
+    # certainty -- on the sample living room, 2 drops every single-sighting
+    # object, which is most of them.
+    min_observations: int = 1
+
 
 @dataclass
 class QueryConfig:
@@ -78,6 +83,13 @@ class QueryConfig:
     component_voxel: float = 0.04        # metres
     min_instance_agreement: float = 0.3  # above this, two view-sets are one object
     max_agreement_points: int = 2000     # grouping is pairwise; this caps the cost
+
+    # --- the certainty gate ---
+    # A match nothing could cross-check is not a located object; it is a guess
+    # with coordinates attached. Dropping it beats reporting it, because a
+    # confident wrong box gets acted on and a missing one does not.
+    min_views: int = 2
+    min_mean_vote: float = 0.5
 
 
 @dataclass

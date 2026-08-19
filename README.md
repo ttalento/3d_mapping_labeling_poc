@@ -425,6 +425,15 @@ It does not separate objects that physically touch: a sofa arm resting against a
 cabinet is genuinely one connected mass of points, and no geometric test splits
 it. That needs a segmentation model and is deliberately not implemented.
 
+By default a query reports only objects it can actually place: at least two views
+that agree. One view can be cross-checked against nothing, so its box is a guess
+with coordinates attached — and a confident wrong box gets acted on, while a
+missing one does not. `--all` shows what was hidden, and the count is always
+printed, because a filter that silently halves the object list is
+indistinguishable from a bug.
+
+`room3d refit --min-observations 2` applies the same trade to a whole room.
+
 ## Phone video rotation
 
 Phones shoot portrait but store frames landscape with a `rotate` flag. OpenCV
