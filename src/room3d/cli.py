@@ -5,6 +5,7 @@
     room3d level       --room office            # only for rooms built before levelling
     room3d label       out/office/frames.npz --room office [--direct]
     room3d refit       --room office            # redo the 3D boxes, no VLM calls
+    room3d query       --room office "couch"     # name a thing, get its box
     room3d view        out/office
     room3d run         data/rooms/office/video.mp4 --room office
 
@@ -16,6 +17,7 @@ that makes the two halves independent.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -118,6 +120,64 @@ def cmd_refit(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_query(args) -> int:
+    from .query import commit_match, query_room
+
+    out = _out_dir(args.room)
+    cfg = load_config(args.config).query
+    overrides = {}
+    if args.min_vote is not None:
+        overrides["min_vote"] = args.min_vote
+
+    detector = None
+    if args.force or args.detector:
+        detector = _build_detector(args)
+
+    try:
+        result = query_room(
+            out, args.phrase,
+            config=cfg, config_overrides=overrides or None,
+            detector=detector, force=args.force,
+            verbose=not args.json,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result.as_dict(), indent=2))
+    elif not result.matches:
+        for note in result.notes:
+            print(f"[query] {note}")
+
+    if args.commit is not None:
+        if args.commit < 1 or args.commit > len(result.matches):
+            print(f"error: --commit is 1-indexed; this query returned "
+                  f"{len(result.matches)} match(es)", file=sys.stderr)
+            return 1
+        try:
+            commit_match(out, result.matches[args.commit - 1], verbose=not args.json)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    return 0
+
+
+def _build_detector(args):
+    """A detector only when one is actually needed -- building it loads .env."""
+    from .vlm import GeminiDetector, load_env, resolve_model
+
+    load_env()
+    cfg = load_config(args.config).label
+    return GeminiDetector(
+        model=resolve_model(cfg.model),
+        request_masks=False,
+        max_retries=cfg.max_retries,
+        min_interval_s=60.0 / max(cfg.max_rpm, 1),
+    )
 
 
 def cmd_view(args) -> int:
@@ -242,6 +302,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     f.add_argument("--room", required=True)
     f.set_defaults(func=cmd_refit)
+
+    q = sub.add_parser("query", help="name an object, get its 3D box (no reconstruction)")
+    q.add_argument("phrase", help='e.g. "couch" or "the couch by the window"')
+    q.add_argument("--room", required=True)
+    q.add_argument("--force", action="store_true",
+                   help="ignore the cached detections and ask the VLM")
+    q.add_argument("--detector", action="store_true",
+                   help="allow VLM calls when the cache cannot answer")
+    q.add_argument("--commit", type=int, default=None, metavar="N",
+                   help="promote match N (1-indexed) into objects.json")
+    q.add_argument("--min-vote", type=float, default=None,
+                   help="fraction of views that must agree (default 0.6)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_query)
 
     v = sub.add_parser("view", help="show the cloud with labeled boxes")
     v.add_argument("dir")

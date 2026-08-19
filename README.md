@@ -148,6 +148,10 @@ uv run room3d view        out/office
 # rebuild the 3D boxes from detections already on disk — no VLM calls
 uv run room3d refit       --room office
 
+# name one object and get its box, carved by cross-view agreement
+uv run room3d query --room office "couch"
+uv run room3d query --room office "couch" --commit 1   # replace the duplicates
+
 # only for rooms reconstructed before levelling existed
 uv run room3d level       --room office
 ```
@@ -231,6 +235,9 @@ src/room3d/
 ├── projection.py    ★ 2D detection -> 3D, gravity-aligned boxes  (pure, tested)
 ├── fusion.py        ★ observations -> unique objects  (pure, tested)
 ├── refit.py         redo projection + fusion from stored detections, no VLM
+├── camera.py        world -> pixel, and whether a point was actually seen
+├── consensus.py   ★ cross-view voting: carve boxes, decide identity  (pure, tested)
+├── query.py         name an object, get its box; optionally commit it
 ├── vlm.py           Gemini detection
 ├── crew/            CrewAI agents, tools, session, synonym resolution
 ├── webapp/          FastAPI viewer + vanilla-JS frontend
@@ -390,6 +397,33 @@ sofa filmed by walking past it produces views that each overlap their neighbours
 and not the far end; once two merge, their mean sits between them and every later
 view is measured from a place no observation ever was, so the far half splits off
 as a second sofa.
+
+## Querying one object
+
+`room3d query --room living "couch"` answers from the detections already on
+disk. It costs nothing and calls nothing, because the expensive part of a run —
+good 2D boxes — is already there.
+
+What it adds is other cameras. An axis-aligned 2D box around a non-rectangular
+object contains things that are not the object; a `cabinet` box also holds the
+sofa in front of it. That information is not in the frame, but it is in the
+other frames: clutter sits at a different depth, so under parallax it projects
+*outside* the box seen from another angle while the object projects inside every
+one of them. `consensus.carve` counts those agreements and keeps what survives.
+
+Two rules make the count honest. A frame that could not see a point does not
+vote on it — occlusion is not disagreement. And a point does not vote for
+itself, since a point harvested from frame 6's box is inside frame 6's box by
+construction.
+
+The same vote answers the other question. If object A's points land inside
+object B's boxes and B's inside A's, they are one object listed twice — which is
+why `--commit` can replace several duplicate entries with one, on evidence
+rather than on a tuned threshold.
+
+It does not separate objects that physically touch: a sofa arm resting against a
+cabinet is genuinely one connected mass of points, and no geometric test splits
+it. That needs a segmentation model and is deliberately not implemented.
 
 ## Phone video rotation
 
