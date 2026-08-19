@@ -383,3 +383,70 @@ def _vlm_views(recon, doc, phrase, detector, notes: list[str]) -> list[View]:
     if not views:
         notes.append(f"the detector found nothing matching {phrase!r} in any frame")
     return views
+
+
+def commit_match(room_dir: str | Path, match: QueryMatch, *, verbose: bool = True) -> dict:
+    """Write a match into `objects.json`, replacing what it subsumes.
+
+    This is the step that fixes duplicates. A query that finds one couch where
+    the object list holds two removes both and writes one, on the strength of the
+    cross-view evidence rather than a threshold that happened to work.
+
+    Destructive, so it backs up first: a vague phrase must never cost a labelled
+    room. Same `.prev.json` convention as `refit.py`.
+    """
+    from .fusion import ObjectRecord
+
+    if not match.supported or match.obb is None:
+        raise ValueError(
+            "this match is unsupported -- it was found in 2D but no 3D points "
+            "survived carving, so there is no box to commit"
+        )
+
+    room_dir = Path(room_dir)
+    path = room_dir / "objects.json"
+    doc = json.loads(path.read_text()) if path.exists() else {"objects": []}
+    objects = list(doc.get("objects", []))
+
+    absorbed = set(match.absorbed_object_ids)
+    kept = [o for o in objects if o.get("id") not in absorbed]
+    removed = [o["id"] for o in objects if o.get("id") in absorbed]
+
+    # Reuse an absorbed id where there is one: the new object *is* the old one,
+    # better measured, and stable ids keep any external references working.
+    if match.absorbed_object_ids:
+        object_id = sorted(match.absorbed_object_ids)[0]
+    else:
+        used = {o.get("id", "") for o in kept}
+        n = 0
+        while f"obj_{n:03d}" in used:
+            n += 1
+        object_id = f"obj_{n:03d}"
+
+    labels = {normalize_label(v.label) for v in match.views}
+    record = ObjectRecord(
+        id=object_id,
+        label=match.label,
+        aliases=sorted(labels - {normalize_label(match.label)}),
+        centroid=np.asarray(match.obb.center, dtype=float),
+        obb=match.obb,
+        confidence=match.score,
+        n_observations=len(match.views),
+        seen_in=sorted({v.frame_idx for v in match.views}),
+        observation_ids=sorted(
+            v.observation_id for v in match.views if v.observation_id is not None
+        ),
+    )
+
+    # Metadata (units, scale_verified, ...) is carried over, not re-derived:
+    # whether the metric scale was checked against a tape measure is a fact
+    # about the capture, and nothing here re-measures it.
+    path.with_suffix(".prev.json").write_text(json.dumps(doc, indent=2))
+    doc["objects"] = kept + [record.as_dict()]
+    path.write_text(json.dumps(doc, indent=2))
+
+    if verbose:
+        print(f"[query] committed {object_id} ({match.label}); "
+              f"removed {len(removed)} absorbed object(s)")
+
+    return {"object_id": object_id, "removed": removed, "n_objects": len(doc["objects"])}
