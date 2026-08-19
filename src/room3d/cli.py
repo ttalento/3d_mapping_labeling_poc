@@ -171,13 +171,25 @@ def cmd_query(args) -> int:
                   f"{len(kept)} match(es)", file=sys.stderr)
             return 1
         try:
-            commit_match(
+            committed = commit_match(
                 out, kept[args.commit - 1],
                 config=cfg, force=args.force_commit, verbose=not args.json,
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+
+        # A VLM-sourced match's Views carry no observation_id/object_id (see
+        # `_vlm_views`), so `absorbed_object_ids` is always empty and this
+        # commit can only ever add a new object -- never replace the
+        # duplicates the flagship `--force --commit` flow exists to fix. Zero
+        # removed reads the same either way in the ordinary "committed X;
+        # removed 0" line above, so say the reason explicitly rather than
+        # leave a user to infer it.
+        if not args.json and result.source == "vlm" and not committed["removed"]:
+            print(f"[query] note: {committed['object_id']} came from the VLM, "
+                  f"not the cache, so it had no observation ids to absorb -- "
+                  f"it was added, not used to replace an existing duplicate")
 
     return 0
 
@@ -366,7 +378,10 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("phrase", help='e.g. "couch" or "the couch by the window"')
     q.add_argument("--room", required=True)
     q.add_argument("--force", action="store_true",
-                   help="ignore the cached detections and ask the VLM")
+                   help="ignore the cached detections and ask the VLM -- a "
+                        "VLM-sourced match carries no observation/object ids, "
+                        "so --commit can never make it absorb an existing "
+                        "duplicate; it always adds a new object")
     q.add_argument("--detector", action="store_true",
                    help="allow VLM calls when the cache cannot answer")
     q.add_argument("--commit", type=int, default=None, metavar="N",
