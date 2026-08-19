@@ -467,12 +467,18 @@ _MASK_BASELINE = 1.0
 
 
 def test_the_mask_is_a_subset_of_the_box_it_explains():
+    """half=12, not the default half=6: at half=6 the derivation above (see
+    `_MASK_BASELINE`) puts the mask at 0 of 144 pixels, so `not outside.any()`
+    would hold no matter what the implementation did -- a vacuous pass. At
+    half=12 it is 120 of 576, a genuine strict subset, and non-emptiness is
+    checked directly below rather than assumed."""
     recon = make_recon([camera_at(-_MASK_BASELINE), camera_at(0.0), camera_at(_MASK_BASELINE)])
     target = np.array([0.0, 0.0, 4.0])
-    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+    views = [View(i, box_around(target, recon, i, half=12)) for i in range(3)]
 
     mask = consistency_mask(1, views, recon)
     assert mask.shape == recon.image_hw
+    assert mask.any()                             # non-vacuous: something was kept
 
     x0, y0, x1, y1 = views[1].box_px
     outside = mask.copy()
