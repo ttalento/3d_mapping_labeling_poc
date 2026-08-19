@@ -415,7 +415,12 @@ def filter_by_certainty(
 
 
 def commit_match(
-    room_dir: str | Path, match: QueryMatch, *, force: bool = False, verbose: bool = True
+    room_dir: str | Path,
+    match: QueryMatch,
+    *,
+    config: QueryConfig | None = None,
+    force: bool = False,
+    verbose: bool = True,
 ) -> dict:
     """Write a match into `objects.json`, replacing what it subsumes.
 
@@ -426,10 +431,14 @@ def commit_match(
     Destructive, so it backs up first: a vague phrase must never cost a labelled
     room. Same `.prev.json` convention as `refit.py`.
 
-    Refuses a match below the certainty gate (`QueryConfig`'s defaults) unless
-    `force=True`: committing writes a position into `objects.json` that later
-    code will treat as fact, and an uncertain box acted on is worse than one
-    never written.
+    Refuses a match below the certainty gate unless `force=True`: committing
+    writes a position into `objects.json` that later code will treat as fact,
+    and an uncertain box acted on is worse than one never written. The gate
+    uses `config` -- default `QueryConfig()` if the caller has none -- rather
+    than a second, independently-defaulted `QueryConfig()` of its own, because
+    a caller that already decided a match is committable (against, say, a
+    `--config` override loosening `min_views`) must not have that decision
+    re-litigated here against different numbers and refused.
     """
     from .fusion import ObjectRecord
 
@@ -440,7 +449,7 @@ def commit_match(
         )
 
     if not force:
-        config = QueryConfig()
+        config = config or QueryConfig()
         if not filter_by_certainty(
             [match], min_views=config.min_views, min_mean_vote=config.min_mean_vote
         )[0]:

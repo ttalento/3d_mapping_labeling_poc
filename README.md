@@ -428,9 +428,13 @@ it. That needs a segmentation model and is deliberately not implemented.
 By default a query reports only objects it can actually place: at least two views
 that agree. One view can be cross-checked against nothing, so its box is a guess
 with coordinates attached — and a confident wrong box gets acted on, while a
-missing one does not. `--all` shows what was hidden, and the count is always
-printed, because a filter that silently halves the object list is
-indistinguishable from a bug.
+missing one does not. `--all` shows what was hidden; short of that, the hidden
+count is printed in normal output and the hidden matches themselves are listed
+in full under `hidden` in `--json` output, because a filter that silently halves
+the object list is indistinguishable from a bug. `--commit N` and, in `--json`
+mode, `matches[N-1]` always refer to the numbering the gate leaves behind, not
+to the raw list underneath it — a match's printed or reported position is what
+gets written.
 
 `room3d refit --min-observations 2` applies the same trade to a whole room.
 

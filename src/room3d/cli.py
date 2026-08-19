@@ -143,7 +143,12 @@ def cmd_query(args) -> int:
             out, args.phrase,
             config=cfg, config_overrides=overrides or None,
             detector=detector, force=args.force,
-            verbose=not args.json,
+            # cmd_query does its own printing below, numbered off the
+            # certainty-filtered list. query_room's own numbering runs over
+            # every match it found, before that filter is applied, and
+            # --commit N must never index a different list than the one the
+            # user just read.
+            verbose=False,
         )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -154,16 +159,11 @@ def cmd_query(args) -> int:
         kept, dropped = filter_by_certainty(
             result.matches, min_views=cfg.min_views, min_mean_vote=cfg.min_mean_vote
         )
-    if dropped and not args.json:
-        print(f"[query] {len(dropped)} match(es) hidden as too uncertain to place "
-              f"(need {cfg.min_views}+ views agreeing at {cfg.min_mean_vote:.2f}); "
-              f"--all shows them")
 
     if args.json:
-        print(json.dumps(result.as_dict(), indent=2))
-    elif not result.matches:
-        for note in result.notes:
-            print(f"[query] {note}")
+        print(json.dumps(_query_payload(result, kept, dropped), indent=2))
+    else:
+        _print_query_result(args.phrase, result, kept, dropped, cfg)
 
     if args.commit is not None:
         if args.commit < 1 or args.commit > len(kept):
@@ -173,13 +173,54 @@ def cmd_query(args) -> int:
         try:
             commit_match(
                 out, kept[args.commit - 1],
-                force=args.force_commit, verbose=not args.json,
+                config=cfg, force=args.force_commit, verbose=not args.json,
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
     return 0
+
+
+def _print_query_result(phrase, result, kept, dropped, cfg) -> None:
+    """The human-readable report, numbered `1..len(kept)` -- the same numbers
+    `--commit N` indexes into, and the same list `_query_payload` reports as
+    `matches`. Printing from here rather than from `query_room` is what keeps
+    those three in lockstep instead of merely usually agreeing.
+    """
+    import numpy as np
+
+    print(f"[query] {phrase!r} -> {len(kept)} match(es) from {result.source}")
+    for i, m in enumerate(kept, 1):
+        size = "unsupported" if m.obb is None else np.round(m.obb.extent, 3).tolist()
+        print(f"[query]   {i}. {m.label:<16} score={m.score:.2f} "
+              f"views={len(m.views)} extent={size}")
+
+    if dropped:
+        print(f"[query] {len(dropped)} match(es) hidden as too uncertain to place "
+              f"(need {cfg.min_views}+ views agreeing at {cfg.min_mean_vote:.2f}); "
+              f"--all shows them")
+    for note in result.notes:
+        print(f"[query] note: {note}")
+
+
+def _query_payload(result, kept, dropped) -> dict:
+    """The `--json` counterpart of `_print_query_result`.
+
+    `matches[i]` is exactly what `--commit i+1` would write -- the same
+    property the printed output has -- rather than the unfiltered result a
+    machine caller could not safely correlate with `--commit`. Dropped
+    matches are not reduced to a count: they are listed in full under
+    `hidden`, because a caller must be able to see what got hidden, not just
+    trust that something did.
+    """
+    return {
+        "phrase": result.phrase,
+        "source": result.source,
+        "matches": [m.as_dict() for m in kept],
+        "hidden": [m.as_dict() for m in dropped],
+        "notes": list(result.notes),
+    }
 
 
 def _build_detector(args):

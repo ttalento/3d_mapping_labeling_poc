@@ -110,6 +110,25 @@ def test_force_overrides_the_certainty_gate(tmp_path):
                         verbose=False)["object_id"]
 
 
+def test_commit_match_gates_against_the_callers_config_not_a_second_default(tmp_path):
+    """A caller that already decided a match is committable -- against its own
+    `QueryConfig`, e.g. one loosened by `--config` -- must not have that
+    decision re-litigated here against a second, independently-defaulted
+    `QueryConfig()` and refused."""
+    (tmp_path / "objects.json").write_text(json.dumps({"room": "r", "objects": []}))
+    loose = QueryConfig(min_views=1, min_mean_vote=0.0)
+    assert commit_match(tmp_path, a_match(n_views=1), config=loose,
+                        verbose=False)["object_id"]
+
+
+def test_commit_match_defaults_to_querys_own_default_config(tmp_path):
+    """No `config` passed falls back to `QueryConfig()`, matching the module's
+    own default rather than an all-permissive one."""
+    (tmp_path / "objects.json").write_text(json.dumps({"room": "r", "objects": []}))
+    with pytest.raises(ValueError, match="certainty gate"):
+        commit_match(tmp_path, a_match(n_views=1), verbose=False)
+
+
 # --- the same trade, applied to a whole room ---------------------------------
 
 
@@ -133,3 +152,103 @@ def test_refit_reports_nothing_dropped_by_default(tmp_path):
     from test_refit import legacy_room
 
     assert refit_room(legacy_room(tmp_path), verbose=False)["n_dropped_uncertain"] == 0
+
+
+# --- the CLI: what gets printed as N is what --commit N writes ---------------
+#
+# A phrase that matches several physical objects returns several QueryMatches
+# of mixed certainty. The number a user reads next to a match and the index
+# --commit uses have to be the same list by construction, not by the raw list
+# and the filtered list happening to agree in whatever fixture a test reaches
+# for. `query_room` is monkeypatched here rather than reconstructed through
+# the full detection pipeline, precisely so the raw order can be pinned to the
+# alternating dropped/kept/dropped/kept shape that is the minimal case where
+# the two lists diverge -- filter_by_certainty itself is exercised for real.
+
+
+def _named_match(label, n_views):
+    obb = OrientedBox(np.zeros(3), np.ones(3), np.eye(3))
+    return QueryMatch(
+        label=label,
+        obb=obb,
+        score=0.5,
+        views=[View(i, (0, 0, 10, 10)) for i in range(n_views)],
+        n_points=100,
+        vote_stats={"mean_vote": 0.9, "min_vote": 0.6,
+                    "n_candidates": 10, "n_kept": 5, "kept_frac": 0.5},
+        supported=True,
+    )
+
+
+def _mixed_certainty_matches():
+    """dropped, kept, dropped, kept -- so kept = [B, D], and the raw position
+    of D (4th) differs from its kept position (2nd)."""
+    return [_named_match("chair-A", 1), _named_match("chair-B", 3),
+            _named_match("chair-C", 1), _named_match("chair-D", 3)]
+
+
+@pytest.fixture
+def cli_room(tmp_path, monkeypatch):
+    """query_room is monkeypatched in every test below, so nothing here reads
+    frames.npz or observations.json -- only objects.json needs to exist, for
+    commit_match to have something to write into."""
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "out" / "demo"
+    out.mkdir(parents=True)
+    (out / "objects.json").write_text(
+        json.dumps({"room": "demo", "units": "meters", "objects": []})
+    )
+    return out
+
+
+def _patch_query_room(monkeypatch, matches):
+    import room3d.query as query_mod
+
+    monkeypatch.setattr(
+        query_mod, "query_room",
+        lambda *a, **k: query_mod.QueryResult("chair", matches, "cache", []),
+    )
+
+
+def test_commit_n_commits_the_object_printed_as_n(cli_room, monkeypatch, capsys):
+    from room3d.cli import main
+
+    _patch_query_room(monkeypatch, _mixed_certainty_matches())
+
+    assert main(["query", "--room", "demo", "chair", "--commit", "2"]) == 0
+    out = capsys.readouterr().out
+
+    # Printed numbering runs over the kept list only: B first, D second.
+    assert "1. chair-B" in out
+    assert "2. chair-D" in out
+    assert "2 match(es) hidden" in out
+
+    written = json.loads((cli_room / "objects.json").read_text())["objects"]
+    assert len(written) == 1
+    assert written[0]["label"] == "chair-D"          # printed "2." -- not chair-B
+
+
+def test_commit_1_commits_the_first_kept_match_not_the_first_raw_match(
+    cli_room, monkeypatch
+):
+    from room3d.cli import main
+
+    _patch_query_room(monkeypatch, _mixed_certainty_matches())
+
+    assert main(["query", "--room", "demo", "chair", "--commit", "1"]) == 0
+    written = json.loads((cli_room / "objects.json").read_text())["objects"]
+    assert written[0]["label"] == "chair-B"          # raw match 1 is chair-A, dropped
+
+
+def test_json_matches_array_position_matches_the_commit_target(cli_room, monkeypatch, capsys):
+    """The `--json` payload has to give a machine caller the same guarantee
+    the printed text gives a human: `matches[i]` is what `--commit i+1` writes."""
+    from room3d.cli import main
+
+    _patch_query_room(monkeypatch, _mixed_certainty_matches())
+
+    assert main(["query", "--room", "demo", "chair", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert [m["label"] for m in payload["matches"]] == ["chair-B", "chair-D"]
+    assert [m["label"] for m in payload["hidden"]] == ["chair-A", "chair-C"]
