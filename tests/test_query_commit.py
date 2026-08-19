@@ -11,9 +11,11 @@ import numpy as np
 import pytest
 
 from room3d.artifacts import save_frames_npz
+from room3d.consensus import View
 from room3d.crew.pipeline import build_observations_doc
 from room3d.crew.tools import ClusterObservationsTool, ProjectDetectionsTool
-from room3d.query import commit_match, query_room
+from room3d.projection import OrientedBox
+from room3d.query import QueryMatch, commit_match, query_room
 from test_boxfit_wiring import labelled_session
 
 
@@ -121,3 +123,83 @@ def test_an_unsupported_match_cannot_be_committed(tmp_path):
     result = query_room(room, "sofa", config_overrides={"min_vote": 1.01}, verbose=False)
     with pytest.raises(ValueError, match="unsupported"):
         commit_match(room, result.matches[0], verbose=False)
+
+
+# --- absorbed observations must not dangle ------------------------------------
+
+
+def two_object_room(tmp_path):
+    """A hand-built room with two objects, each seen twice, so committing a
+    match that absorbs both leaves observations pointing at both old ids."""
+    obs = [
+        {"id": 0, "object_id": "obj_000", "frame_idx": 0, "label": "couch",
+         "vlm_confidence": 0.9, "box_px": [1, 2, 3, 4]},
+        {"id": 1, "object_id": "obj_000", "frame_idx": 1, "label": "couch",
+         "vlm_confidence": 0.9, "box_px": [1, 2, 3, 4]},
+        {"id": 2, "object_id": "obj_001", "frame_idx": 2, "label": "couch",
+         "vlm_confidence": 0.9, "box_px": [1, 2, 3, 4]},
+        {"id": 3, "object_id": "obj_001", "frame_idx": 3, "label": "couch",
+         "vlm_confidence": 0.9, "box_px": [1, 2, 3, 4]},
+    ]
+    (tmp_path / "observations.json").write_text(json.dumps({
+        "room": "room", "image_hw": [10, 10], "frames_labeled": [0, 1, 2, 3],
+        "observations": obs,
+    }))
+
+    def obj(object_id):
+        return {
+            "id": object_id, "label": "couch", "aliases": [],
+            "centroid": [0.0, 0.0, 0.0],
+            "obb": {"center": [0.0, 0.0, 0.0], "extent": [1.0, 1.0, 1.0],
+                    "R": np.eye(3).tolist()},
+            "confidence": 0.5, "n_observations": 2, "seen_in": [0, 1],
+            "observation_ids": [0, 1] if object_id == "obj_000" else [2, 3],
+        }
+
+    (tmp_path / "objects.json").write_text(json.dumps({
+        "room": "room", "units": "meters", "scale_verified": False,
+        "n_frames_labeled": 4, "objects": [obj("obj_000"), obj("obj_001")],
+    }))
+    return tmp_path
+
+
+def absorbing_match():
+    obb = OrientedBox(np.zeros(3), np.ones(3), np.eye(3))
+    return QueryMatch(
+        label="couch",
+        obb=obb,
+        score=0.8,
+        views=[
+            View(0, (1, 2, 3, 4), label="couch", observation_id=0, object_id="obj_000"),
+            View(1, (1, 2, 3, 4), label="couch", observation_id=1, object_id="obj_000"),
+            View(2, (1, 2, 3, 4), label="couch", observation_id=2, object_id="obj_001"),
+            View(3, (1, 2, 3, 4), label="couch", observation_id=3, object_id="obj_001"),
+        ],
+        n_points=100,
+        vote_stats={"mean_vote": 0.9, "min_vote": 0.5,
+                    "n_candidates": 100, "n_kept": 100, "kept_frac": 1.0},
+        absorbed_object_ids=["obj_000", "obj_001"],
+        supported=True,
+    )
+
+
+def test_committing_a_multi_object_match_repoints_every_absorbed_observation(tmp_path):
+    room = two_object_room(tmp_path)
+    result = commit_match(room, absorbing_match(), verbose=False)
+
+    observations = json.loads((room / "observations.json").read_text())["observations"]
+    live_ids = {o["id"] for o in json.loads((room / "objects.json").read_text())["objects"]}
+    # An id can be reused (the committed object may take an absorbed id), so
+    # the real invariant is that every observation names an id that still
+    # exists in objects.json -- not merely that it avoids the removed set.
+    assert all(o["object_id"] in live_ids for o in observations)
+    assert all(o["object_id"] == result["object_id"] for o in observations)
+
+
+def test_committing_backs_up_observations_json_before_repointing(tmp_path):
+    room = two_object_room(tmp_path)
+    before = json.loads((room / "observations.json").read_text())
+
+    commit_match(room, absorbing_match(), verbose=False)
+
+    assert json.loads((room / "observations.prev.json").read_text()) == before

@@ -502,8 +502,49 @@ def commit_match(
     doc["objects"] = kept + [record.as_dict()]
     path.write_text(json.dumps(doc, indent=2))
 
+    _repoint_absorbed_observations(room_dir, absorbed, object_id)
+
     if verbose:
         print(f"[query] committed {object_id} ({match.label}); "
               f"removed {len(removed)} absorbed object(s)")
 
     return {"object_id": object_id, "removed": removed, "n_objects": len(doc["objects"])}
+
+
+def _repoint_absorbed_observations(
+    room_dir: Path, absorbed: set, object_id: str
+) -> None:
+    """Rewrite every absorbed observation's `object_id` to the committed id.
+
+    `commit_match` only ever rewrites `objects.json`; without this, an
+    observation that used to belong to an absorbed object keeps pointing at an
+    id that no longer exists in `objects.json`. The webapp associates
+    observations to objects by that field
+    (`o.object_id === S.selected` in `app.js`), so a dangling link makes a
+    merged object display only a subset of the frames it was built from.
+
+    Same `.prev.json` backup discipline as `objects.json`: destructive, so it
+    backs up first.
+    """
+    if not absorbed:
+        return
+
+    obs_path = room_dir / "observations.json"
+    if not obs_path.exists():
+        return
+
+    original = obs_path.read_text()
+    doc = json.loads(original)
+    observations = doc.get("observations", [])
+
+    changed = False
+    for item in observations:
+        if item.get("object_id") in absorbed:
+            item["object_id"] = object_id
+            changed = True
+
+    if not changed:
+        return
+
+    obs_path.with_suffix(".prev.json").write_text(original)
+    obs_path.write_text(json.dumps(doc, indent=2))
