@@ -55,6 +55,25 @@ Rules:
 
 Return at most 25 objects."""
 
+LOCATE_PROMPT = """\
+You are looking at one frame of a walkthrough of a single room.
+
+Find every physically distinct object in this image matching this description:
+
+    {phrase}
+
+Rules:
+- One entry per physical object. If two things match the description, return two.
+- If the description mentions a position or a relationship ("by the window", "the
+  left one"), only return objects that actually satisfy it.
+- If nothing in this image matches, return an empty list. An empty list is a
+  correct and useful answer; a guess is not.
+- Set `label` to the description you were given, verbatim.
+- `box_2d` must be [ymin, xmin, ymax, xmax], normalised 0-1000.
+- `confidence` is your own 0-1 certainty that this object matches the description.
+
+Return at most 5 objects."""
+
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -169,6 +188,19 @@ class GeminiDetector:
             )
 
         raw = self._call_with_retry(prompt, payload)
+        return self._parse(raw)
+
+    def locate(self, image: np.ndarray | Path | str, phrase: str) -> list[Detection]:
+        """Find one named thing, rather than surveying everything.
+
+        Two differences from `detect` that matter. The model is told what to look
+        for, so it can resolve a description the cached labels cannot -- "the
+        couch by the window" is a spatial relation, and labels do not carry
+        those. And it is told that finding nothing is a correct answer, because
+        the alternative is a model that always returns something.
+        """
+        payload = self._to_part(image)
+        raw = self._call_with_retry(LOCATE_PROMPT.format(phrase=phrase), payload)
         return self._parse(raw)
 
     # --- internals ----------------------------------------------------------

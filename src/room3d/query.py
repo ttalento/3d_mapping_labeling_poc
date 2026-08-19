@@ -342,4 +342,44 @@ def _score(group: Sequence[View], mean_vote: float) -> float:
 
 
 def _vlm_views(recon, doc, phrase, detector, notes: list[str]) -> list[View]:
-    raise NotImplementedError("targeted detection lands in Task 9")
+    """Ask the detector for `phrase` in every frame the room was labelled on.
+
+    Those frames were already chosen for coverage by `select_covering_frames`;
+    re-deriving the selection here would spend calls to arrive at the same list.
+
+    One frame failing must not lose the other eleven. Gemini's free tier returns
+    429 often enough that an all-or-nothing query would frequently return
+    nothing at all, which is indistinguishable from the object being absent.
+    """
+    from .projection import descale_box
+
+    frames = [int(i) for i in doc.get("frames_labeled", [])]
+    frames = [i for i in frames if i < recon.n_frames] or list(range(recon.n_frames))
+
+    height, width = recon.image_hw
+    views: list[View] = []
+    failures = 0
+
+    for frame_idx in frames:
+        try:
+            detections = detector.locate(recon.images[frame_idx], phrase)
+        except Exception as exc:  # noqa: BLE001 - one bad frame must not lose the rest
+            failures += 1
+            notes.append(f"frame {frame_idx} failed: {exc}")
+            continue
+
+        for det in detections:
+            views.append(
+                View(
+                    frame_idx=frame_idx,
+                    box_px=descale_box(det.box_2d, height, width),
+                    label=det.label or phrase,
+                    vlm_confidence=float(det.confidence),
+                )
+            )
+
+    if failures:
+        notes.append(f"{failures} of {len(frames)} frames failed to be searched")
+    if not views:
+        notes.append(f"the detector found nothing matching {phrase!r} in any frame")
+    return views
