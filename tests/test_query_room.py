@@ -90,6 +90,20 @@ def test_a_match_whose_points_are_all_carved_away_is_reported_as_unsupported(tmp
     assert result.matches[0].obb is None
 
 
+def test_score_is_not_inflated_by_over_carving(tmp_path):
+    """`mean_vote` feeds `_score`. If it is averaged over the survivors of the
+    `min_vote` cut, raising `min_vote` can only raise it, so an over-carved
+    box -- smaller, worse -- reports a *higher* score. Averaged over the
+    candidates instead, `mean_vote` (and so `score`) does not move just
+    because the cut got stricter."""
+    room = room_on_disk(tmp_path)
+    loose = query_room(room, "sofa", config_overrides={"min_vote": 0.1}, verbose=False).matches[0]
+    tight = query_room(room, "sofa", config_overrides={"min_vote": 0.9}, verbose=False).matches[0]
+
+    assert tight.vote_stats["n_kept"] < loose.vote_stats["n_kept"]   # it did over-carve
+    assert tight.score == pytest.approx(loose.score, abs=1e-6)
+
+
 def test_matches_are_ranked_best_first(tmp_path):
     result = query_room(room_on_disk(tmp_path), "sofa", verbose=False)
     scores = [m.score for m in result.matches]

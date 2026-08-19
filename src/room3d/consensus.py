@@ -220,6 +220,17 @@ def carve(
     them. Returning an empty set there would read as "the object is not present"
     when the truth is "nothing could verify it"; callers report the view count so
     the difference stays visible.
+
+    `stats["mean_vote"]` is averaged over the *candidates*, not the survivors.
+    `consistent` keeps only points whose fraction already clears `min_vote`, so
+    a survivor-only average is `>= min_vote` by construction -- raising the bar
+    can only raise it further, which would make an over-carved box (smaller,
+    worse) report *higher* confidence than a lightly-carved one. Averaging over
+    every candidate answers a different, useful question instead: how agreed is
+    this object overall, independent of where the cut was drawn. The
+    survivor-only number is still reported, under `stats["kept_mean_vote"]`,
+    for callers that want it -- but nothing here or in `query.py`'s `_score`
+    consumes it.
     """
     points, source = candidate_points(views, recon)
     stats = {
@@ -228,6 +239,7 @@ def carve(
         "n_kept": int(len(points)),
         "kept_frac": 1.0,
         "mean_vote": 0.0,
+        "kept_mean_vote": 0.0,
     }
 
     if len(points) == 0 or len(views) < 2:
@@ -245,7 +257,10 @@ def carve(
 
     stats["n_kept"] = int(len(kept))
     stats["kept_frac"] = round(float(len(kept) / max(len(points), 1)), 4)
-    stats["mean_vote"] = round(_mean_vote(kept, kept_source, views, recon, occlusion_tol), 4)
+    stats["mean_vote"] = round(_mean_vote(points, source, views, recon, occlusion_tol), 4)
+    stats["kept_mean_vote"] = round(
+        _mean_vote(kept, kept_source, views, recon, occlusion_tol), 4
+    )
     return CarveResult(kept, kept_source, stats)
 
 

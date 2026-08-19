@@ -330,10 +330,12 @@ def _score(group: Sequence[View], mean_vote: float) -> float:
     """A within-query ranking key. Not a probability, not comparable across queries.
 
     Geometric mean of three independent signals -- how many views support the
-    match, how strongly the surviving points are agreed on, and how sure the VLM
-    was. `_cluster_confidence` in `fusion.py` combines its terms the same way and
-    for the same reason: a match that fails any one of them must not be rescued
-    by the other two.
+    match, how strongly the candidate points are agreed on (`carve`'s
+    `stats["mean_vote"]`, averaged over every candidate rather than only the
+    survivors of the `min_vote` cut -- otherwise carving harder would report
+    higher confidence, not lower), and how sure the VLM was. `_cluster_confidence`
+    in `fusion.py` combines its terms the same way and for the same reason: a
+    match that fails any one of them must not be rescued by the other two.
     """
     view_score = 1.0 - np.exp(-len(group) / 2.0)
     vlm_score = float(np.mean([v.vlm_confidence for v in group])) if group else 0.0

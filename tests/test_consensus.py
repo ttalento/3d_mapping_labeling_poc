@@ -274,6 +274,41 @@ def test_carving_reports_how_much_it_removed():
     assert stats["min_vote"] == 0.6
 
 
+def test_mean_vote_is_computed_over_candidates_not_survivors():
+    """`min_vote` keeps points whose fraction already clears the bar, so a
+    `mean_vote` averaged over the survivors is `>= min_vote` by construction --
+    raising the bar can only raise it further, rewarding over-carving with a
+    *higher* reported confidence. Averaged over the full candidate set instead,
+    it says how agreed the object is regardless of where the bar was set.
+
+    Baseline 0.5 -- see the note in
+    test_carving_removes_the_distractor_and_keeps_the_object."""
+    recon = make_recon([camera_at(-0.5), camera_at(0.0), camera_at(0.5)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    loose = carve(views, recon, min_vote=0.1, keep_largest=False)
+    tight = carve(views, recon, min_vote=0.9, keep_largest=False)
+
+    assert tight.stats["n_kept"] < loose.stats["n_kept"]              # still over-carves
+    assert tight.stats["mean_vote"] == pytest.approx(loose.stats["mean_vote"])
+
+
+def test_the_survivor_mean_vote_is_still_reported_under_its_own_key():
+    """The old, kept-only number is a real (if construction-biased) quantity
+    and stays available -- under a name that does not collide with the one
+    `_score`/`filter_by_certainty` now consume."""
+    recon = make_recon([camera_at(-0.5), camera_at(0.0), camera_at(0.5)])
+    target = np.array([0.0, 0.0, 4.0])
+    views = [View(i, box_around(target, recon, i)) for i in range(3)]
+
+    loose = carve(views, recon, min_vote=0.1, keep_largest=False)
+    tight = carve(views, recon, min_vote=0.9, keep_largest=False)
+
+    assert "kept_mean_vote" in loose.stats
+    assert tight.stats["kept_mean_vote"] >= loose.stats["kept_mean_vote"]
+
+
 def test_carving_a_single_view_returns_its_candidates_unchanged():
     """Leave-one-out leaves nothing to check against. Returning an empty result
     would read as 'not there' when the truth is 'not verifiable'."""
