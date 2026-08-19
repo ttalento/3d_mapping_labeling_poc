@@ -22,5 +22,6 @@ __pycache__/
 
 # claude
 .claude/
+.superpowers/
 CLAUDE.md
 PLAN.md
