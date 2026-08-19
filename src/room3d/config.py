@@ -75,9 +75,18 @@ class QueryConfig:
     is inside the box. Unanimity destroys small objects seen by few cameras;
     zero carves nothing. It is tuned against one room, so every query reports its
     vote statistics rather than leaving this a magic number.
+
+    0.5, not 0.6. With leave-one-out a point is judged by at most
+    `n_views - 1` frames, so at 0.6 a 3-view object -- the modal case in a
+    real room -- needs `ceil(0.6 * 2) == 2` of its 2 judges: unanimity. 0.5
+    is the largest value that is not unanimity there
+    (`ceil(0.5 * 2) == 1`). See the step table in README.md's "Querying one
+    object" section for the full picture across view counts, and note the
+    one case no `min_vote` fixes: a 2-view object has exactly one judge, so
+    the fraction is 0 or 1 and every positive threshold is unanimity.
     """
 
-    min_vote: float = 0.6
+    min_vote: float = 0.5
     occlusion_tol: float = 0.10          # relative depth slack in the z-buffer test
     keep_largest_component: bool = True
     component_voxel: float = 0.04        # metres

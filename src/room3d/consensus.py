@@ -98,7 +98,7 @@ def consistent(
     views: Sequence[View],
     recon,
     *,
-    min_vote: float = 0.6,
+    min_vote: float = 0.5,
     occlusion_tol: float = 0.10,
     source: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -107,6 +107,12 @@ def consistent(
     A point no view could judge is never consistent. Absence of evidence is not
     evidence, and treating it as agreement would keep exactly the points that
     nothing has checked.
+
+    0.5, not 0.6 -- see `QueryConfig.min_vote`'s docstring for why 0.6 is
+    unanimity for the 3-view case that is a real room's modal one, and note
+    that no value of `min_vote` changes anything for a 2-view object: one
+    judge means the fraction is 0 or 1, so every positive threshold demands
+    unanimity there regardless.
     """
     agree, testable = vote(
         points, views, recon, occlusion_tol=occlusion_tol, source=source
@@ -208,7 +214,7 @@ def carve(
     views: Sequence[View],
     recon,
     *,
-    min_vote: float = 0.6,
+    min_vote: float = 0.5,
     occlusion_tol: float = 0.10,
     keep_largest: bool = True,
     voxel: float = 0.04,

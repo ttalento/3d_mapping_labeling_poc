@@ -135,10 +135,15 @@ def test_min_vote_is_monotonic():
 
 def test_unanimity_is_available_but_is_not_the_default():
     """It was the default in the first probe and it destroyed a speaker seen by
-    two cameras."""
+    two cameras.
+
+    0.5, not 0.6: with leave-one-out a point is judged by at most
+    n_views - 1 frames, so 0.6 is unanimity for a 3-view object (ceil(0.6 *
+    2) == 2 of 2), the modal case in a real room. 0.5 is the largest value
+    that does not impose unanimity there (ceil(0.5 * 2) == 1 of 2)."""
     import inspect
 
-    assert inspect.signature(consistent).parameters["min_vote"].default == 0.6
+    assert inspect.signature(consistent).parameters["min_vote"].default == 0.5
 
 
 # --- leave-one-out -------------------------------------------------------------
@@ -271,7 +276,8 @@ def test_carving_reports_how_much_it_removed():
     assert stats["n_kept"] < stats["n_candidates"]
     assert 0.0 <= stats["kept_frac"] <= 1.0
     assert 0.0 <= stats["mean_vote"] <= 1.0
-    assert stats["min_vote"] == 0.6
+    assert stats["min_vote"] == 0.5              # carve's own default; see
+    # test_unanimity_is_available_but_is_not_the_default for why 0.5
 
 
 def test_mean_vote_is_computed_over_candidates_not_survivors():

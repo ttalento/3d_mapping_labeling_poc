@@ -387,7 +387,14 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--commit", type=int, default=None, metavar="N",
                    help="promote match N (1-indexed) into objects.json")
     q.add_argument("--min-vote", type=float, default=None,
-                   help="fraction of views that must agree (default 0.6)")
+                   help="fraction of the views that could see a point which "
+                        "must agree it is inside the box (default 0.5). With "
+                        "leave-one-out a point is judged by at most n_views-1 "
+                        "frames, so this is a step function, not a smooth "
+                        "knob -- see README.md's \"Querying one object\" for "
+                        "the table. For a 2-view object no value changes "
+                        "anything: one judge means every positive threshold "
+                        "is unanimity")
     q.add_argument("--all", action="store_true",
                    help="include matches too uncertain to place")
     q.add_argument("--force-commit", action="store_true",

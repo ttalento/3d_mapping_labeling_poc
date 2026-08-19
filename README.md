@@ -425,6 +425,32 @@ It does not separate objects that physically touch: a sofa arm resting against a
 cabinet is genuinely one connected mass of points, and no geometric test splits
 it. That needs a segmentation model and is deliberately not implemented.
 
+### `--min-vote`: a step function, not a smooth knob
+
+`min_vote` is the fraction of the frames that could see a point which must
+agree it is inside the box, judged leave-one-out -- a point does not vote for
+itself, so at most `n_views - 1` frames can ever judge it. That makes the
+*effective* threshold a step function of how many views the object was seen
+in, and the step table is the single most operationally important fact about
+this feature:
+
+| views | judges (`n_views - 1`) | at `min_vote=0.6` | at `min_vote=0.5` |
+|---|---|---|---|
+| 2 | 1 | 1/1 | 1/1 |
+| 3 | 2 | **2/2** | **1/2** |
+| 4 | 3 | 2/3 | 2/3 |
+| 5 | 4 | 3/4 | 2/4 |
+| 6 | 5 | 3/5 | 3/5 |
+
+`0.6` is unanimity for a 3-view object -- the modal case in a real room -- and
+`0.5` is the largest value that is not. The default is `0.5` for exactly that
+reason: on a real room, `0.6` discarded ~83% of candidate points and produced
+a couch measuring 0.878 × 0.197 × 0.141.
+
+**For a 2-view object, no value of `min_vote` changes anything.** One judge
+means the fraction is 0 or 1, so every positive threshold demands unanimity —
+raising or lowering `--min-vote` cannot help or hurt a 2-view match.
+
 By default a query reports only objects it can actually place: at least two views
 that agree. One view can be cross-checked against nothing, so its box is a guess
 with coordinates attached — and a confident wrong box gets acted on, while a

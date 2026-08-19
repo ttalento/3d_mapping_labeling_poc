@@ -111,8 +111,11 @@ def test_an_injected_matcher_is_respected():
 
 
 def test_query_config_has_the_documented_defaults():
+    """0.5, not 0.6: with leave-one-out a point is judged by at most
+    n_views - 1 frames, so 0.6 is unanimity for a 3-view object -- the modal
+    case in a real room -- and 0.5 is the largest value that is not."""
     c = QueryConfig()
-    assert c.min_vote == 0.6
+    assert c.min_vote == 0.5
     assert c.occlusion_tol == 0.10
     assert c.keep_largest_component is True
     assert c.component_voxel == 0.04
