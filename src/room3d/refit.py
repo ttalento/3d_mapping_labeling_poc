@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .artifacts import load_frames_npz, save_observation_points
+from .artifacts import OBSERVATION_POINTS_NAME, load_frames_npz, save_observation_points
 from .config import LabelConfig
 from .fusion import cluster_observations
 from .level import estimate_up
@@ -144,12 +144,18 @@ def _scene_frame(recon, config: LabelConfig, verbose: bool):
 
 
 def _write(room_dir, obs_path, doc, room_name, previous, observations, objects) -> None:
-    """Rewrite objects.json and observations.json, keeping one generation back.
+    """Rewrite objects.json, observations.json and their points sidecar,
+    keeping one generation back of each.
 
-    Both get a `.prev.json` copy first. `observations.json` carries the pixel
-    boxes and labels the VLM returned, which are the only part of a run that
-    cannot be recomputed -- rewriting it in place would make a bad refit
-    unrecoverable without spending the quota again.
+    All three get a backup first. `observations.json` carries the pixel boxes
+    and labels the VLM returned, which are the only part of a run that cannot
+    be recomputed -- rewriting it in place would make a bad refit unrecoverable
+    without spending the quota again. `observation_points.npz` has to back up
+    alongside it rather than separately: a refit that skips any observation
+    (`n_skipped > 0`) re-enumerates the ones that remain, so ids shift, and
+    restoring `observations.prev.json` without the matching points backup would
+    attach each observation the wrong frame's points -- silently, since nothing
+    checks that a restore is internally consistent.
 
     The previous run's metadata is carried over rather than re-derived: whether
     the metric scale was verified against a real measurement is a fact about the
@@ -160,6 +166,10 @@ def _write(room_dir, obs_path, doc, room_name, previous, observations, objects) 
     for path in (room_dir / "objects.json", obs_path):
         if path.exists():
             path.with_suffix(".prev.json").write_text(path.read_text())
+
+    points_path = room_dir / OBSERVATION_POINTS_NAME
+    if points_path.exists():
+        points_path.with_suffix(".prev.npz").write_bytes(points_path.read_bytes())
 
     objects_path = room_dir / "objects.json"
     objects_path.write_text(json.dumps({

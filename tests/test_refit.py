@@ -115,6 +115,23 @@ def test_refit_backs_up_both_files_it_overwrites(tmp_path):
     assert backup == before
 
 
+def test_refit_backs_up_the_points_sidecar_too(tmp_path):
+    """`save_observation_points` overwrites `observation_points.npz` with no
+    backup of its own. When a refit re-enumerates observations (any run with
+    `n_skipped > 0`), ids shift, so restoring `observations.prev.json` alone
+    then attaches each observation the wrong frame's points -- the three files
+    have to restore together or not at all."""
+    room = legacy_room(tmp_path)
+    refit_room(room, verbose=False)                      # first run: no prior sidecar
+    before = (room / "observation_points.npz").read_bytes()
+
+    refit_room(room, verbose=False)                      # second run: overwrites it
+
+    backup = room / "observation_points.prev.npz"
+    assert backup.exists()
+    assert backup.read_bytes() == before
+
+
 def test_refit_refuses_a_room_with_no_observations(tmp_path):
     save_frames_npz(tmp_path / "frames.npz", build_recon())
     with pytest.raises(FileNotFoundError, match="observations.json"):
